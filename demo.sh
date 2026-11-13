@@ -55,8 +55,13 @@ sha_of() {
     fi
 }
 
+# Three files of different sizes, so the demo exercises a real multi-file
+# transfer rather than one big blob.
 mkdir -p "$WORK/inbox"
-dd if=/dev/urandom of="$WORK/payload.bin" bs=1048576 count="$SIZE_MB" 2>/dev/null
+dd if=/dev/urandom of="$WORK/photo.jpg" bs=1048576 count="$SIZE_MB" 2>/dev/null
+dd if=/dev/urandom of="$WORK/notes.pdf" bs=1024 count=340 2>/dev/null
+dd if=/dev/urandom of="$WORK/clip.mp4" bs=1048576 count="$((SIZE_MB / 2 + 1))" 2>/dev/null
+FILES=("$WORK/photo.jpg" "$WORK/notes.pdf" "$WORK/clip.mp4")
 
 step "starting receiver on :$PORT"
 "$BIN" receive --port "$PORT" --alias nas --dir "$WORK/inbox" >"$WORK/receiver.log" 2>&1 &
@@ -64,38 +69,62 @@ RECV_PID=$!
 sleep 1.5
 note "pid $RECV_PID, saving to $WORK/inbox"
 
+FINGERPRINT="$(grep -o 'fingerprint [0-9a-f]*' "$WORK/receiver.log" | awk '{print $2}' | head -1)"
+note "peer fingerprint ${FINGERPRINT:0:16}…"
+
 step "discovering devices"
 "$BIN" discover --wait 4 >"$WORK/discover.log" 2>/dev/null || true
 cat "$WORK/discover.log"
 
 if grep -q "nas" "$WORK/discover.log"; then
-    step "sending ${SIZE_MB}MB over discovery"
-    "$BIN" send "$WORK/payload.bin" --to nas --scan 3
+    step "sending 3 files over discovery (fingerprint pinned automatically)"
+    "$BIN" send "${FILES[@]}" --to nas --scan 3
 else
     warn "multicast is blocked on this network — falling back to --ip"
-    note "this is the same escape hatch zapsend suggests when a scan finds nothing"
-    step "sending ${SIZE_MB}MB over --ip"
-    "$BIN" send "$WORK/payload.bin" --ip "127.0.0.1:$PORT"
+    note "the fingerprint still comes from the receiver, so TLS stays pinned"
+    step "sending 3 files over --ip with an explicit fingerprint"
+    "$BIN" send "${FILES[@]}" --ip "127.0.0.1:$PORT" --fingerprint "$FINGERPRINT"
 fi
 
 step "verifying"
-if [[ ! -f "$WORK/inbox/payload.bin" ]]; then
-    warn "file never arrived"
+FAILED=0
+for src in "${FILES[@]}"; do
+    name="$(basename "$src")"
+    dst="$WORK/inbox/$name"
+    if [[ ! -f "$dst" ]]; then
+        warn "$name never arrived"
+        FAILED=1
+        continue
+    fi
+    a="$(sha_of "$src")"
+    b="$(sha_of "$dst")"
+    if [[ "$a" == "$b" ]]; then
+        ok "$name  ${a:0:16}…"
+    else
+        warn "$name  checksum mismatch"
+        FAILED=1
+    fi
+done
+
+if [[ "$FAILED" -ne 0 ]]; then
     echo
     cat "$WORK/receiver.log"
     exit 1
 fi
 
-SRC_SHA="$(sha_of "$WORK/payload.bin")"
-DST_SHA="$(sha_of "$WORK/inbox/payload.bin")"
+step "rejecting a wrong fingerprint"
+# Capture first, then grep: `| grep -q` closes the pipe early, the sender dies
+# of SIGPIPE, and `set -o pipefail` would report failure even on a match.
+"$BIN" send "$WORK/notes.pdf" \
+    --ip "127.0.0.1:$PORT" \
+    --fingerprint "0000000000000000000000000000000000000000000000000000000000000000" \
+    >"$WORK/pin.log" 2>&1 || true
 
-note "source $SRC_SHA"
-note "dest   $DST_SHA"
-
-if [[ "$SRC_SHA" == "$DST_SHA" ]]; then
-    ok "byte-identical (${SIZE_MB}MB)"
+if grep -q "pinning failed" "$WORK/pin.log"; then
+    ok "wrong fingerprint was refused"
 else
-    warn "checksum mismatch"
+    warn "wrong fingerprint was NOT refused"
+    cat "$WORK/pin.log"
     exit 1
 fi
 

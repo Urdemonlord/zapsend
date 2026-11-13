@@ -1,4 +1,8 @@
 //! The sending side: prepare-upload, then stream the bytes.
+//!
+//! TLS is pinned to the peer's certificate fingerprint. LocalSend hands the
+//! fingerprint out during discovery, so we never have to trust the network:
+//! the certificate the peer presents must hash to exactly that value.
 
 use crate::protocol::{
     DeviceInfo, FileMeta, Peer, PrepareUploadRequest, PrepareUploadResponse, API,
@@ -6,57 +10,171 @@ use crate::protocol::{
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{verify_tls12_signature, verify_tls13_signature};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
-fn client() -> Result<reqwest::Client> {
-    // LocalSend uses self-signed certs pinned by fingerprint. For v0.0.1 we
-    // accept any cert; TODO: verify the peer fingerprint we got from discovery.
+/// Accepts exactly one certificate: the one whose SHA-256 matches `expected`.
+#[derive(Debug)]
+struct PinnedVerifier {
+    expected: Vec<u8>,
+}
+
+impl ServerCertVerifier for PinnedVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        let got = Sha256::digest(end_entity.as_ref());
+        if got.as_slice() == self.expected.as_slice() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(TlsError::General(format!(
+                "certificate fingerprint mismatch: expected {}, got {}",
+                hex::encode(&self.expected),
+                hex::encode(got)
+            )))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn pinned_client(fingerprint_hex: &str) -> Result<reqwest::Client> {
+    let expected = hex::decode(fingerprint_hex).context("fingerprint is not valid hex")?;
+    if expected.len() != 32 {
+        bail!(
+            "fingerprint must be 64 hex characters (32 bytes), got {} characters",
+            fingerprint_hex.len()
+        );
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedVerifier { expected }))
+        .with_no_client_auth();
+
+    Ok(reqwest::Client::builder()
+        .use_preconfigured_tls(config)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
+/// Only for peers whose fingerprint we do not know (plain `--ip` without
+/// `--fingerprint`). Everything discovered over multicast is pinned.
+fn unpinned_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(30))
         .build()?)
 }
 
-pub async fn send_file(peer: &Peer, me: &DeviceInfo, path: &Path) -> Result<()> {
-    if !path.exists() {
-        bail!("no such file: {}", path.display());
+struct Pending {
+    id: String,
+    path: PathBuf,
+    name: String,
+    size: u64,
+}
+
+pub async fn send_files(peer: &Peer, me: &DeviceInfo, paths: &[PathBuf]) -> Result<()> {
+    if paths.is_empty() {
+        bail!("no files to send");
     }
 
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .context("invalid file name")?
-        .to_string();
-    let size = std::fs::metadata(path)?.len();
+    let mut pending = Vec::new();
+    for (idx, path) in paths.iter().enumerate() {
+        let meta =
+            std::fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
+        if meta.is_dir() {
+            bail!(
+                "{} is a directory — folder transfer is not implemented yet",
+                path.display()
+            );
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .with_context(|| format!("invalid file name: {}", path.display()))?
+            .to_string();
+        pending.push(Pending {
+            id: idx.to_string(),
+            path: path.clone(),
+            name,
+            size: meta.len(),
+        });
+    }
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("hashing…");
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let hash_path = path.to_path_buf();
-    let sha256 = tokio::task::spawn_blocking(move || sha256_file(&hash_path)).await??;
+    let mut files = HashMap::new();
+    for item in &pending {
+        let path = item.path.clone();
+        let sha = tokio::task::spawn_blocking(move || sha256_file(&path)).await??;
+        files.insert(
+            item.id.clone(),
+            FileMeta {
+                id: item.id.clone(),
+                file_name: item.name.clone(),
+                size: item.size,
+                file_type: None,
+                sha256: Some(sha),
+            },
+        );
+    }
     spinner.finish_and_clear();
 
-    let file_id = "0".to_string();
-    let mut files = HashMap::new();
-    files.insert(
-        file_id.clone(),
-        FileMeta {
-            id: file_id.clone(),
-            file_name: file_name.clone(),
-            size,
-            file_type: None,
-            sha256: Some(sha256),
-        },
-    );
+    let http = if peer.info.fingerprint.is_empty() {
+        eprintln!("! no fingerprint for this peer — TLS certificate is NOT verified");
+        unpinned_client()?
+    } else {
+        pinned_client(&peer.info.fingerprint)?
+    };
 
-    let http = client()?;
     let base = peer.base_url();
-
     let resp = http
         .post(format!("{base}{API}/prepare-upload"))
         .json(&PrepareUploadRequest {
@@ -65,7 +183,19 @@ pub async fn send_file(peer: &Peer, me: &DeviceInfo, path: &Path) -> Result<()> 
         })
         .send()
         .await
-        .context("prepare-upload request failed")?;
+        .map_err(|e| {
+            // Surface a pinning failure as a pinning failure, not as a
+            // generic connection error three layers deep.
+            let err = anyhow::Error::new(e);
+            let chain = format!("{err:#}");
+            if chain.contains("fingerprint mismatch") {
+                anyhow::anyhow!(
+                    "TLS pinning failed — the peer presented a different certificate than the one you pinned\n  {chain}"
+                )
+            } else {
+                err.context("prepare-upload request failed")
+            }
+        })?;
 
     if !resp.status().is_success() {
         let code = resp.status();
@@ -74,48 +204,62 @@ pub async fn send_file(peer: &Peer, me: &DeviceInfo, path: &Path) -> Result<()> 
     }
 
     let prepared: PrepareUploadResponse = resp.json().await.context("bad prepare-upload body")?;
-    let token = prepared
-        .files
-        .get(&file_id)
-        .context("receiver did not return a token for our file")?
-        .clone();
 
-    let url = format!(
-        "{base}{API}/upload?sessionId={}&fileId={}&token={}",
-        prepared.session_id, file_id, token
-    );
-
-    let file = tokio::fs::File::open(path).await?;
-    let pb = Arc::new(ProgressBar::new(size));
+    let total: u64 = pending.iter().map(|p| p.size).sum();
+    let overall = ProgressBar::new(total);
     if let Ok(style) =
-        ProgressStyle::with_template("{msg} [{bar:30}] {bytes}/{total_bytes} ({eta})")
+        ProgressStyle::with_template("{msg}\n[{bar:32}] {bytes}/{total_bytes} overall ({eta})")
     {
-        pb.set_style(style.progress_chars("=> "));
+        overall.set_style(style.progress_chars("=> "));
     }
-    pb.set_message(file_name.clone());
+    overall.set_message(format!("{} file(s)", pending.len()));
 
-    let bar = pb.clone();
-    let stream = ReaderStream::new(file).map(move |chunk| {
-        if let Ok(ref c) = chunk {
-            bar.inc(c.len() as u64);
+    for item in &pending {
+        let token = prepared
+            .files
+            .get(&item.id)
+            .with_context(|| format!("receiver did not return a token for {}", item.name))?;
+
+        let url = format!(
+            "{base}{API}/upload?sessionId={}&fileId={}&token={}",
+            prepared.session_id, item.id, token
+        );
+
+        let file = tokio::fs::File::open(&item.path).await?;
+        let pb = Arc::new(ProgressBar::new(item.size));
+        if let Ok(style) =
+            ProgressStyle::with_template("{msg} [{bar:24}] {bytes}/{total_bytes} ({eta})")
+        {
+            pb.set_style(style.progress_chars("=> "));
         }
-        chunk
-    });
+        pb.set_message(item.name.clone());
 
-    let resp = http
-        .post(&url)
-        .body(reqwest::Body::wrap_stream(stream))
-        .send()
-        .await
-        .context("upload failed")?;
-    pb.finish_and_clear();
+        let bar = pb.clone();
+        let done = overall.clone();
+        let stream = ReaderStream::new(file).map(move |chunk| {
+            if let Ok(ref c) = chunk {
+                bar.inc(c.len() as u64);
+                done.inc(c.len() as u64);
+            }
+            chunk
+        });
 
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("upload rejected ({code}): {body}");
+        let resp = http
+            .post(&url)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+            .with_context(|| format!("upload failed for {}", item.name))?;
+        pb.finish_and_clear();
+
+        if !resp.status().is_success() {
+            let code = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            bail!("upload rejected for {} ({code}): {body}", item.name);
+        }
     }
 
+    overall.finish_and_clear();
     Ok(())
 }
 

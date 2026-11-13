@@ -34,10 +34,11 @@ pub enum Command {
         wait: u64,
     },
 
-    /// Send a file to a device
+    /// Send one or more files to a device
     Send {
-        /// File to send
-        file: PathBuf,
+        /// Files to send
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
 
         /// Target: alias or fingerprint prefix (from `zapsend discover`)
         #[arg(long)]
@@ -47,6 +48,13 @@ pub enum Command {
         /// (`192.168.1.42` or `192.168.1.42:53400`)
         #[arg(long, conflicts_with = "to")]
         ip: Option<String>,
+
+        /// Pin the peer's certificate fingerprint (64 hex chars).
+        ///
+        /// Discovery already supplies this. It is required if you want a
+        /// verified connection while using --ip on an untrusted network.
+        #[arg(long)]
+        fingerprint: Option<String>,
 
         /// Discovery scan duration in seconds (ignored with --ip)
         #[arg(long, default_value_t = 4)]

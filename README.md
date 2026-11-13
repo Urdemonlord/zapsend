@@ -57,15 +57,20 @@ including a Raspberry Pi.
 
 ```
 ▸ starting receiver on :53400
+  peer fingerprint ab9628b112df49e2…
 ▸ discovering devices
 ALIAS                    ADDRESS              TYPE       FINGERPRINT
 nas                      192.168.1.77:53400   headless   ab9628b1…
-▸ sending 8MB over discovery
+▸ sending 3 files over discovery (fingerprint pinned automatically)
+sending 3 file(s), 13.3 MiB to "nas" (192.168.1.77:53400)
+  pinned to ab9628b1
 ✓ done
 ▸ verifying
-  source 8c20157ca2d240088dbd4ecd69f0eb2d41820d6271942f5fd7e390fc762cc25f
-  dest   8c20157ca2d240088dbd4ecd69f0eb2d41820d6271942f5fd7e390fc762cc25f
-✓ byte-identical (8MB)
+✓ photo.jpg  0ee1cf51e902ff3f…
+✓ notes.pdf  2d75bb88795c4827…
+✓ clip.mp4   7d99e9346049726a…
+▸ rejecting a wrong fingerprint
+✓ wrong fingerprint was refused
 ```
 
 If your network blocks multicast (guest wifi, corporate VLAN, many VMs), the
@@ -84,17 +89,18 @@ pixel                    192.168.1.42:53317   mobile     9f2c1ab4…
 thinkpad                 192.168.1.10:53317   desktop    c41e77d0…
 ```
 
-### Send a file
+### Send files
 
 ```sh
 zapsend send report.pdf --to pixel
+zapsend send photo.jpg notes.pdf clip.mp4 --to pixel
 
 # or skip discovery entirely, including a non-default port
 zapsend send report.pdf --ip 192.168.1.42
 zapsend send report.pdf --ip 192.168.1.42:53400
 ```
 
-The receiver shows a normal LocalSend prompt — accept it there and the file lands.
+The receiver shows a normal LocalSend prompt — accept it there and the files land.
 
 ### Receive files
 
@@ -121,12 +127,26 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 | Piece | What zapsend does |
 |---|---|
 | Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake |
-| Identity | Self-signed cert, SHA-256 fingerprint pinned by the peer |
+| Identity | Self-signed cert; the sender pins the peer's SHA-256 fingerprint |
 | Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
 | Ports | Multicast always `53317`; API port configurable via `--port` |
 
 Everything is streamed — a 40 GB file does not touch RAM. Incoming file names
 are sanitized, and existing files are never overwritten (`a.txt` → `a (1).txt`).
+
+### Security model
+
+LocalSend uses self-signed certificates, so there is no CA to trust. Trust comes
+from pinning instead:
+
+1. Discovery tells you the peer's fingerprint — the SHA-256 of its certificate.
+2. When connecting, zapsend accepts **only** the certificate hashing to that
+   exact value. Anything else fails the handshake before a byte is sent.
+
+That means a machine-in-the-middle on the LAN cannot impersonate a peer, even
+though the certificate is self-signed. It also means the fingerprint is the
+whole security story: if you pass `--fingerprint` by hand, get it from
+`zapsend discover` on the same network, not from a chat message.
 
 ## Roadmap
 
@@ -135,19 +155,21 @@ are sanitized, and existing files are never overwritten (`a.txt` → `a (1).txt`
 - [x] Send a single file
 - [x] Receive into a directory
 - [x] Configurable API port (two instances per machine)
-- [ ] Multiple files per transfer
+- [x] Multiple files per transfer
+- [x] Fingerprint pinning on send
 - [ ] Folder transfer
 - [ ] Resume interrupted transfers
 - [ ] PIN-protected receiving
 - [ ] `zapsend daemon` with a watch folder
-- [ ] Fingerprint verification on send (currently accepts any cert)
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [ ] mDNS fallback for networks that block multicast
 
 ## Known limitations
 
-- **v0.0.1 accepts any TLS certificate** when sending. Fingerprint pinning is
-  on the roadmap; until then, only send to networks you trust.
+- **`--ip` without `--fingerprint` is unverified.** Sending to a raw address
+  skips discovery, so there is no fingerprint to pin against; zapsend warns
+  and accepts whatever certificate answers. Pass `--fingerprint` (get it from
+  `zapsend discover`) to close that hole. Discovery-based sends are always pinned.
 - Files are hashed (SHA-256) before upload, which costs an extra read pass.
 - No resume yet: a dropped connection means starting over.
 - **Interop with the real LocalSend app is not verified yet.** The wire format

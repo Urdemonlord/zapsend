@@ -56,12 +56,20 @@ async fn start(alias: &str, port: u16, download_dir: PathBuf) -> Result<Stack> {
 
     let app = server::router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    // Bind before spawning so a taken port fails loudly here instead of
+    // silently leaving a receiver that claims to listen but never does.
+    let listener = std::net::TcpListener::bind(addr).with_context(|| {
+        format!("cannot bind the API server to :{port} — another instance already holds it")
+    })?;
+    listener.set_nonblocking(true)?;
+
     tokio::spawn(async move {
-        if let Err(e) = axum_server::bind_rustls(addr, tls)
+        if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
         {
-            eprintln!("! API server on :{port} unavailable ({e}) — continuing anyway");
+            eprintln!("! API server stopped: {e}");
         }
     });
 
@@ -91,7 +99,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Discover { wait } => discover(&alias, port, wait).await,
-        Command::Send { file, to, ip, scan } => send(&alias, port, file, to, ip, scan).await,
+        Command::Send {
+            files,
+            to,
+            ip,
+            fingerprint,
+            scan,
+        } => send(&alias, port, files, to, ip, fingerprint, scan).await,
         Command::Receive { dir } => receive(&alias, port, dir).await,
     }
 }
@@ -142,6 +156,21 @@ fn print_peers(peers: &[Peer]) {
     }
 }
 
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -180,12 +209,14 @@ fn parse_target(raw: &str) -> Result<(IpAddr, u16)> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send(
     alias: &str,
     port: u16,
-    file: PathBuf,
+    files: Vec<PathBuf>,
     to: Option<String>,
     ip: Option<String>,
+    fingerprint: Option<String>,
     scan_secs: u64,
 ) -> Result<()> {
     // Straight-to-address sends need neither a server nor discovery, so they
@@ -200,7 +231,7 @@ async fn send(
                     version: PROTOCOL_VERSION.to_string(),
                     device_model: None,
                     device_type: None,
-                    fingerprint: String::new(),
+                    fingerprint: fingerprint.clone().unwrap_or_default(),
                     port: target_port,
                     protocol: "https".to_string(),
                     download: false,
@@ -220,19 +251,43 @@ async fn send(
                     bail!("no device selected");
                 }
             };
+            if let Some(expected) = fingerprint.as_deref() {
+                if !peer.info.fingerprint.eq_ignore_ascii_case(expected) {
+                    bail!(
+                        "fingerprint mismatch: you pinned {}, but discovery found {}",
+                        expected,
+                        peer.info.fingerprint
+                    );
+                }
+            }
             (stack, peer)
         }
     };
 
+    let bytes: u64 = files
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .sum();
+
     eprintln!(
-        "sending {} to \"{}\" ({}:{})",
-        file.display(),
+        "sending {} file(s), {} to \"{}\" ({}:{})",
+        files.len(),
+        human_bytes(bytes),
         peer.info.alias,
         peer.ip,
         peer.info.port
     );
+    if peer.info.fingerprint.is_empty() {
+        eprintln!("! unverified peer: pass --fingerprint to pin its certificate");
+    } else {
+        eprintln!(
+            "  pinned to {}",
+            identity::short_fingerprint(&peer.info.fingerprint)
+        );
+    }
 
-    client::send_file(&peer, &stack.me, &file).await?;
+    client::send_files(&peer, &stack.me, &files).await?;
     println!("✓ done");
     Ok(())
 }
