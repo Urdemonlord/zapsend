@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = 53317)]
     pub port: u16,
 
+    /// Dump the raw JSON exchanged with peers, for protocol debugging
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

@@ -8,7 +8,7 @@
 use crate::discovery::Registry;
 use crate::protocol::{DeviceInfo, FileMeta, PrepareUploadRequest, PrepareUploadResponse, API};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -130,17 +130,27 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn register(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(info): Json<DeviceInfo>,
+    body: Bytes,
 ) -> Json<DeviceInfo> {
-    if !info.fingerprint.is_empty() && info.fingerprint != state.me.fingerprint {
-        state.registry.lock().unwrap().insert(
-            info.fingerprint.clone(),
-            crate::protocol::Peer {
-                info: info.clone(),
-                ip: addr.ip(),
-            },
-        );
+    crate::verbose::dump("←", "register", &body);
+
+    // Be liberal here: even if their body is unparsable, they still deserve
+    // our information back so we show up in their device list.
+    match serde_json::from_slice::<DeviceInfo>(&body) {
+        Ok(info) => {
+            if !info.fingerprint.is_empty() && info.fingerprint != state.me.fingerprint {
+                state.registry.lock().unwrap().insert(
+                    info.fingerprint.clone(),
+                    crate::protocol::Peer {
+                        info: info.clone(),
+                        ip: addr.ip(),
+                    },
+                );
+            }
+        }
+        Err(e) => eprintln!("! could not parse register body: {e}"),
     }
+
     Json(state.me.clone())
 }
 
@@ -152,8 +162,20 @@ struct PinQuery {
 async fn prepare_upload(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PinQuery>,
-    Json(req): Json<PrepareUploadRequest>,
+    body: Bytes,
 ) -> axum::response::Response {
+    crate::verbose::dump("←", "prepare-upload", &body);
+
+    // `info` is optional in our model: protocol 2.0 senders may omit it, and a
+    // 422 here would look like a network bug instead of a format mismatch.
+    let req: PrepareUploadRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("✗ bad prepare-upload body: {e}");
+            return (StatusCode::BAD_REQUEST, format!("invalid body: {e}")).into_response();
+        }
+    };
+
     if let Err((code, msg)) = state.pin.check(q.pin.as_deref()) {
         eprintln!("✗ rejected transfer: {msg}");
         return (code, msg).into_response();
@@ -176,15 +198,14 @@ async fn prepare_upload(
         .unwrap()
         .insert(session_id.clone(), Session { files });
 
-    eprintln!(
-        "→ incoming: {} file(s) from \"{}\"",
-        count,
-        if req.info.alias.is_empty() {
-            "unknown"
-        } else {
-            &req.info.alias
-        }
-    );
+    let from = req
+        .info
+        .as_ref()
+        .map(|i| i.alias.as_str())
+        .filter(|a| !a.is_empty())
+        .unwrap_or("unknown");
+
+    eprintln!("→ incoming: {} file(s) from \"{}\"", count, from);
 
     (
         StatusCode::OK,

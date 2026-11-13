@@ -68,7 +68,9 @@ pub fn load_or_create(alias: &str, port: u16) -> Result<(Identity, DeviceInfo)> 
         fingerprint: identity.fingerprint.clone(),
         port,
         protocol: "https".to_string(),
-        download: true,
+        // We do not serve /prepare-download yet. Advertising it would invite
+        // peers to try, and they would get a 404 instead of a clean "no".
+        download: false,
     };
 
     Ok((identity, info))

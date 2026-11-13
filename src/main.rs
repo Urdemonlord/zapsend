@@ -4,6 +4,7 @@ mod discovery;
 mod identity;
 mod protocol;
 mod server;
+mod verbose;
 
 use crate::cli::{Cli, Command};
 use crate::protocol::{DeviceInfo, Peer, DEFAULT_PORT, PROTOCOL_VERSION};
@@ -100,6 +101,7 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
+    verbose::set(cli.verbose);
     let alias = cli.alias.clone();
     let port = cli.port;
 

@@ -101,7 +101,9 @@ pub struct FileMeta {
 /// Body of `POST /prepare-upload`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareUploadRequest {
-    pub info: DeviceInfo,
+    /// Optional: protocol 2.0 senders may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<DeviceInfo>,
     pub files: HashMap<String, FileMeta>,
 }
 

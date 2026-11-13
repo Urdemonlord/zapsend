@@ -184,12 +184,16 @@ pub async fn send_files(
         Some(p) => format!("{base}{API}/prepare-upload?pin={p}"),
         None => format!("{base}{API}/prepare-upload"),
     };
+    let payload = serde_json::to_vec(&PrepareUploadRequest {
+        info: Some(me.clone()),
+        files,
+    })?;
+    crate::verbose::dump("→", "prepare-upload", &payload);
+
     let resp = http
         .post(endpoint)
-        .json(&PrepareUploadRequest {
-            info: me.clone(),
-            files,
-        })
+        .header("content-type", "application/json")
+        .body(payload)
         .send()
         .await
         .map_err(|e| {

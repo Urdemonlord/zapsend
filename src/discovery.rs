@@ -61,6 +61,7 @@ pub async fn announce(sock: &UdpSocket, me: &DeviceInfo) -> Result<()> {
         announce: true,
     })?;
     let dest = SocketAddr::from((multicast_group(), MULTICAST_PORT));
+    crate::verbose::dump("→", "multicast announce", &msg);
     sock.send_to(&msg, dest)
         .await
         .context("sending multicast announcement")?;
@@ -79,6 +80,9 @@ pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, my_fingerprint: St
         };
 
         let Ok(info) = serde_json::from_slice::<DeviceInfo>(&buf[..n]) else {
+            // A peer whose announcement we cannot parse is the single most
+            // likely reason discovery silently finds nothing.
+            crate::verbose::dump("←", "multicast (unparsed)", &buf[..n]);
             continue;
         };
 
