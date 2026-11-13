@@ -33,13 +33,13 @@ can talk to it.
 ## Install
 
 ```sh
-cargo install --git https://github.com/YOURNAME/zapsend
+cargo install --git https://github.com/Urdemonlord/zapsend
 ```
 
 Or build locally:
 
 ```sh
-git clone https://github.com/YOURNAME/zapsend
+git clone https://github.com/Urdemonlord/zapsend
 cd zapsend && cargo build --release
 ./target/release/zapsend --help
 ```
