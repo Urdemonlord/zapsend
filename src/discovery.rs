@@ -7,7 +7,7 @@
 //! We do both: the multicast socket here, and the register endpoint lives in
 //! `server.rs`. Whichever path a peer uses, it lands in the same registry.
 
-use crate::protocol::{Announcement, DeviceInfo, Peer, DEFAULT_PORT, MULTICAST_IP};
+use crate::protocol::{Announcement, DeviceInfo, Peer, MULTICAST_IP, MULTICAST_PORT};
 use anyhow::{Context, Result};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::collections::HashMap;
@@ -40,9 +40,9 @@ pub fn bind_multicast() -> Result<UdpSocket> {
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
 
-    let addr: SocketAddr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT));
+    let addr: SocketAddr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, MULTICAST_PORT));
     sock.bind(&addr.into())
-        .with_context(|| format!("binding UDP {DEFAULT_PORT} (is another LocalSend running?)"))?;
+        .with_context(|| format!("binding UDP {MULTICAST_PORT}"))?;
 
     let std_sock: std::net::UdpSocket = sock.into();
     let socket = UdpSocket::from_std(std_sock)?;
@@ -60,7 +60,7 @@ pub async fn announce(sock: &UdpSocket, me: &DeviceInfo) -> Result<()> {
         info: me.clone(),
         announce: true,
     })?;
-    let dest = SocketAddr::from((multicast_group(), DEFAULT_PORT));
+    let dest = SocketAddr::from((multicast_group(), MULTICAST_PORT));
     sock.send_to(&msg, dest)
         .await
         .context("sending multicast announcement")?;

@@ -2089,7 +2089,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zap"
+name = "zapsend"
 version = "0.0.1"
 dependencies = [
  "anyhow",

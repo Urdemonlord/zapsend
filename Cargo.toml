@@ -1,16 +1,16 @@
 [package]
-name = "zap"
+name = "zapsend"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Headless, LocalSend-compatible file transfer over your local network"
 license = "MIT"
-repository = "https://github.com/YOURNAME/zap"
+repository = "https://github.com/YOURNAME/zapsend"
 keywords = ["localsend", "file-transfer", "lan", "airdrop", "cli"]
 categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
-name = "zap"
+name = "zapsend"
 path = "src/main.rs"
 
 [dependencies]

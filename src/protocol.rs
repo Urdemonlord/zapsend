@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-/// Default port for both the HTTP API and the multicast socket.
+/// Default port for the HTTP API. The spec allows any port here.
 pub const DEFAULT_PORT: u16 = 53317;
+
+/// The multicast socket always listens here; the `port` field in the payload
+/// tells peers where the HTTP API actually is. Keeping these separate is what
+/// lets two instances run on one machine.
+pub const MULTICAST_PORT: u16 = 53317;
 
 /// Default multicast group. The spec uses 224.0.0.167 inside 224.0.0.0/24
 /// because some Android devices reject anything wider.

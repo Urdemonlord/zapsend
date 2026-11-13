@@ -3,7 +3,7 @@
 //! LocalSend authenticates peers by pinning the certificate fingerprint instead
 //! of relying on a CA chain, so we generate one cert on first run and reuse it.
 
-use crate::protocol::{DeviceInfo, DEFAULT_PORT, PROTOCOL_VERSION};
+use crate::protocol::{DeviceInfo, PROTOCOL_VERSION};
 use anyhow::{Context, Result};
 use rcgen::generate_simple_self_signed;
 use sha2::{Digest, Sha256};
@@ -16,14 +16,14 @@ pub struct Identity {
     pub fingerprint: String,
 }
 
-/// Where we keep the cert. `~/.local/share/zap` on Linux, AppData on Windows.
+/// Where we keep the cert. `~/.local/share/zapsend` on Linux, AppData on Windows.
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("zap")
+        .join("zapsend")
 }
 
-pub fn load_or_create(alias: &str) -> Result<(Identity, DeviceInfo)> {
+pub fn load_or_create(alias: &str, port: u16) -> Result<(Identity, DeviceInfo)> {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).context("creating data directory")?;
 
@@ -38,7 +38,7 @@ pub fn load_or_create(alias: &str) -> Result<(Identity, DeviceInfo)> {
             fingerprint: std::fs::read_to_string(&fp_path)?.trim().to_string(),
         }
     } else {
-        let certified = generate_simple_self_signed(vec!["zap.local".to_string()])
+        let certified = generate_simple_self_signed(vec!["zapsend.local".to_string()])
             .context("generating cert")?;
         let cert_pem = certified.cert.pem();
         let key_pem = certified.key_pair.serialize_pem();
@@ -66,7 +66,7 @@ pub fn load_or_create(alias: &str) -> Result<(Identity, DeviceInfo)> {
         // This is the whole point of the project: we tell peers we are headless.
         device_type: Some("headless".to_string()),
         fingerprint: identity.fingerprint.clone(),
-        port: DEFAULT_PORT,
+        port,
         protocol: "https".to_string(),
         download: true,
     };
