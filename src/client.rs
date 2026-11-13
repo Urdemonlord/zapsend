@@ -118,7 +118,12 @@ struct Pending {
     size: u64,
 }
 
-pub async fn send_files(peer: &Peer, me: &DeviceInfo, paths: &[PathBuf]) -> Result<()> {
+pub async fn send_files(
+    peer: &Peer,
+    me: &DeviceInfo,
+    paths: &[PathBuf],
+    pin: Option<&str>,
+) -> Result<()> {
     if paths.is_empty() {
         bail!("no files to send");
     }
@@ -175,8 +180,12 @@ pub async fn send_files(peer: &Peer, me: &DeviceInfo, paths: &[PathBuf]) -> Resu
     };
 
     let base = peer.base_url();
+    let endpoint = match pin {
+        Some(p) => format!("{base}{API}/prepare-upload?pin={p}"),
+        None => format!("{base}{API}/prepare-upload"),
+    };
     let resp = http
-        .post(format!("{base}{API}/prepare-upload"))
+        .post(endpoint)
         .json(&PrepareUploadRequest {
             info: me.clone(),
             files,
@@ -200,7 +209,18 @@ pub async fn send_files(peer: &Peer, me: &DeviceInfo, paths: &[PathBuf]) -> Resu
     if !resp.status().is_success() {
         let code = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("receiver rejected the transfer ({code}): {body}");
+        match code {
+            reqwest::StatusCode::UNAUTHORIZED => match pin {
+                Some(_) => bail!("the receiver rejected the PIN: {body}"),
+                None => {
+                    bail!("this receiver requires a PIN — retry with --pin <digits>\n  ({body})")
+                }
+            },
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                bail!("too many attempts, wait a minute: {body}")
+            }
+            _ => bail!("receiver rejected the transfer ({code}): {body}"),
+        }
     }
 
     let prepared: PrepareUploadResponse = resp.json().await.context("bad prepare-upload body")?;

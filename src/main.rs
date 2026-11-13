@@ -36,7 +36,12 @@ fn local_only(alias: &str, port: u16) -> Result<Stack> {
 }
 
 /// Full stack: HTTPS API server + multicast discovery.
-async fn start(alias: &str, port: u16, download_dir: PathBuf) -> Result<Stack> {
+async fn start(
+    alias: &str,
+    port: u16,
+    download_dir: PathBuf,
+    pin: Option<String>,
+) -> Result<Stack> {
     let (identity, me) = identity::load_or_create(alias, port)?;
     let registry = discovery::new_registry();
 
@@ -45,6 +50,7 @@ async fn start(alias: &str, port: u16, download_dir: PathBuf) -> Result<Stack> {
         registry: registry.clone(),
         download_dir,
         sessions: Mutex::new(HashMap::new()),
+        pin: server::PinState::new(pin),
     });
 
     let tls = RustlsConfig::from_pem(
@@ -104,9 +110,10 @@ async fn main() -> Result<()> {
             to,
             ip,
             fingerprint,
+            pin,
             scan,
-        } => send(&alias, port, files, to, ip, fingerprint, scan).await,
-        Command::Receive { dir } => receive(&alias, port, dir).await,
+        } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
+        Command::Receive { dir, pin } => receive(&alias, port, dir, pin).await,
     }
 }
 
@@ -182,7 +189,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
-    let stack = start(alias, port, PathBuf::from("./zapsend-received")).await?;
+    let stack = start(alias, port, PathBuf::from("./zapsend-received"), None).await?;
     eprintln!("scanning for {wait}s…");
     let peers = scan(&stack, wait).await;
     print_peers(&peers);
@@ -217,6 +224,7 @@ async fn send(
     to: Option<String>,
     ip: Option<String>,
     fingerprint: Option<String>,
+    pin: Option<String>,
     scan_secs: u64,
 ) -> Result<()> {
     // Straight-to-address sends need neither a server nor discovery, so they
@@ -241,7 +249,7 @@ async fn send(
             (stack, peer)
         }
         None => {
-            let stack = start(alias, port, PathBuf::from("./zapsend-received")).await?;
+            let stack = start(alias, port, PathBuf::from("./zapsend-received"), None).await?;
             eprintln!("scanning for {scan_secs}s…");
             let peers = scan(&stack, scan_secs).await;
             let peer = match resolve_target(&peers, to.as_deref())? {
@@ -287,7 +295,7 @@ async fn send(
         );
     }
 
-    client::send_files(&peer, &stack.me, &files).await?;
+    client::send_files(&peer, &stack.me, &files, pin.as_deref()).await?;
     println!("✓ done");
     Ok(())
 }
@@ -319,13 +327,39 @@ fn resolve_target(peers: &[Peer], target: Option<&str>) -> Result<Option<Peer>> 
     }
 }
 
-async fn receive(alias: &str, port: u16, dir: PathBuf) -> Result<()> {
+/// Six digits from an OS-random UUID. No new dependency: uuid v4 already
+/// pulls entropy from the platform.
+fn generate_pin() -> String {
+    uuid::Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .take(6)
+        .map(|b| char::from(b'0' + (b % 10)))
+        .collect()
+}
+
+async fn receive(alias: &str, port: u16, dir: PathBuf, pin: Option<String>) -> Result<()> {
+    let pin = match pin {
+        None => None,
+        Some(p) if p.is_empty() => Some(generate_pin()),
+        Some(p) => {
+            if !p.chars().all(|c| c.is_ascii_digit()) {
+                bail!("PIN must contain digits only, got \"{p}\"");
+            }
+            Some(p)
+        }
+    };
+
     std::fs::create_dir_all(&dir).context("creating download dir")?;
-    let stack = start(alias, port, dir.clone()).await?;
+    let stack = start(alias, port, dir.clone(), pin.clone()).await?;
 
     println!("zapsend is listening on :{port}");
     println!("  alias       {}", stack.me.alias);
     println!("  fingerprint {}", stack.me.fingerprint);
+    match pin {
+        Some(p) => println!("  pin         {p}  (required for incoming transfers)"),
+        None => println!("  pin         none — anyone on this network can send to you"),
+    }
     println!("  saving to   {}", dir.display());
     println!();
     println!("ctrl-c to stop");

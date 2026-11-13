@@ -106,10 +106,17 @@ The receiver shows a normal LocalSend prompt — accept it there and the files l
 
 ```sh
 zapsend receive --dir ~/Downloads
+
+# require a PIN — omit the value and one is generated for you
+zapsend receive --dir ~/Downloads --pin
+zapsend receive --dir ~/Downloads --pin 424242
 ```
 
 Keeps running, announces itself on the network, and accepts incoming transfers.
 Now every phone on your LAN can push files to your NAS.
+
+Printing the PIN is deliberate: it goes to your terminal, not to the network.
+Peers find out a PIN is required only when they get a `401`.
 
 ### Run two instances on one machine
 
@@ -148,6 +155,16 @@ though the certificate is self-signed. It also means the fingerprint is the
 whole security story: if you pass `--fingerprint` by hand, get it from
 `zapsend discover` on the same network, not from a chat message.
 
+Pinning proves *who* you are talking to. A PIN proves *whether you are allowed*.
+They solve different problems, and the receiver needs the PIN because sending
+requires no confirmation on its side:
+
+- Wrong or missing PIN → `401`, and the sender is told to retry with `--pin`
+- Five wrong attempts → `429`, locked for 60 seconds
+
+That throttle is what makes a 6-digit PIN meaningful; without it, 10^6 guesses
+over a LAN is an afternoon script.
+
 ## Roadmap
 
 - [x] Multicast discovery + `discover`
@@ -159,13 +176,16 @@ whole security story: if you pass `--fingerprint` by hand, get it from
 - [x] Fingerprint pinning on send
 - [ ] Folder transfer
 - [ ] Resume interrupted transfers
-- [ ] PIN-protected receiving
+- [x] PIN-protected receiving
 - [ ] `zapsend daemon` with a watch folder
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [ ] mDNS fallback for networks that block multicast
 
 ## Known limitations
 
+- **PIN throttling is global, not per-peer.** Five wrong attempts lock the
+  receiver for everyone for a minute, so someone on the network can briefly
+  deny service to legitimate senders. Per-address throttling is on the roadmap.
 - **`--ip` without `--fingerprint` is unverified.** Sending to a raw address
   skips discovery, so there is no fingerprint to pin against; zapsend warns
   and accepts whatever certificate answers. Pass `--fingerprint` (get it from

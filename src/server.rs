@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio_util::io::StreamReader;
 
 pub struct Session {
@@ -34,6 +35,88 @@ pub struct AppState {
     pub registry: Registry,
     pub download_dir: PathBuf,
     pub sessions: Mutex<HashMap<String, Session>>,
+    pub pin: PinState,
+}
+
+/// A 6-digit PIN is only 10^6 guesses, so the PIN is useless without a
+/// throttle. Five wrong attempts lock preparation for a minute.
+const MAX_PIN_FAILURES: u32 = 5;
+const PIN_LOCKOUT: Duration = Duration::from_secs(60);
+
+pub struct PinState {
+    expected: Option<String>,
+    inner: Mutex<PinInner>,
+}
+
+#[derive(Default)]
+struct PinInner {
+    failures: u32,
+    locked_until: Option<Instant>,
+}
+
+impl PinState {
+    pub fn new(expected: Option<String>) -> Self {
+        Self {
+            expected,
+            inner: Mutex::new(PinInner::default()),
+        }
+    }
+
+    /// `Ok` when the supplied PIN is right, or when no PIN is required.
+    pub fn check(&self, supplied: Option<&str>) -> Result<(), (StatusCode, String)> {
+        let Some(expected) = self.expected.as_deref() else {
+            return Ok(());
+        };
+
+        let mut inner = self.inner.lock().unwrap();
+
+        if let Some(until) = inner.locked_until {
+            let now = Instant::now();
+            if now < until {
+                let wait = (until - now).as_secs() + 1;
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    format!("too many attempts, retry in {wait}s"),
+                ));
+            }
+            inner.locked_until = None;
+        }
+
+        match supplied {
+            Some(given) if ct_eq(given, expected) => {
+                inner.failures = 0;
+                Ok(())
+            }
+            Some(_) => {
+                inner.failures += 1;
+                if inner.failures >= MAX_PIN_FAILURES {
+                    inner.failures = 0;
+                    inner.locked_until = Some(Instant::now() + PIN_LOCKOUT);
+                    Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "too many attempts, locked for 60s".to_string(),
+                    ))
+                } else {
+                    Err((StatusCode::UNAUTHORIZED, "invalid PIN".to_string()))
+                }
+            }
+            None => Err((StatusCode::UNAUTHORIZED, "PIN required".to_string())),
+        }
+    }
+}
+
+/// Length-independent comparison, so a wrong PIN leaks nothing through timing.
+/// Length itself is not secret — a PIN is always short.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -61,10 +144,21 @@ async fn register(
     Json(state.me.clone())
 }
 
+#[derive(Debug, Deserialize)]
+struct PinQuery {
+    pin: Option<String>,
+}
+
 async fn prepare_upload(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<PinQuery>,
     Json(req): Json<PrepareUploadRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if let Err((code, msg)) = state.pin.check(q.pin.as_deref()) {
+        eprintln!("✗ rejected transfer: {msg}");
+        return (code, msg).into_response();
+    }
+
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut tokens = HashMap::new();
     let mut files = HashMap::new();
@@ -99,6 +193,7 @@ async fn prepare_upload(
             files: tokens,
         }),
     )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]

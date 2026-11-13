@@ -38,11 +38,14 @@ fi
 
 WORK="$(mktemp -d)"
 RECV_PID=""
+VAULT_PID=""
 cleanup() {
-    if [[ -n "$RECV_PID" ]]; then
-        kill "$RECV_PID" 2>/dev/null || true
-        wait "$RECV_PID" 2>/dev/null || true
-    fi
+    for pid in "$RECV_PID" "$VAULT_PID"; do
+        if [[ -n "$pid" ]]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -125,6 +128,31 @@ if grep -q "pinning failed" "$WORK/pin.log"; then
 else
     warn "wrong fingerprint was NOT refused"
     cat "$WORK/pin.log"
+    exit 1
+fi
+
+step "PIN protection"
+VAULT_PORT=$((PORT + 1))
+mkdir -p "$WORK/vault"
+"$BIN" receive --port "$VAULT_PORT" --alias vault --pin 424242 --dir "$WORK/vault" >"$WORK/vault.log" 2>&1 &
+VAULT_PID=$!
+sleep 1.5
+
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --pin 000000 >"$WORK/pin_bad.log" 2>&1 || true
+if grep -q "rejected the PIN" "$WORK/pin_bad.log"; then
+    ok "wrong PIN refused"
+else
+    warn "wrong PIN was NOT refused"
+    cat "$WORK/pin_bad.log"
+    exit 1
+fi
+
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --pin 424242 >"$WORK/pin_ok.log" 2>&1 || true
+if [[ -f "$WORK/vault/notes.pdf" ]]; then
+    ok "correct PIN accepted"
+else
+    warn "correct PIN did not get through"
+    cat "$WORK/pin_ok.log"
     exit 1
 fi
 

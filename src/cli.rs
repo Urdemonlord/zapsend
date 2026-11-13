@@ -56,6 +56,10 @@ pub enum Command {
         #[arg(long)]
         fingerprint: Option<String>,
 
+        /// PIN required by the receiving device, if it has one
+        #[arg(long)]
+        pin: Option<String>,
+
         /// Discovery scan duration in seconds (ignored with --ip)
         #[arg(long, default_value_t = 4)]
         scan: u64,
@@ -66,6 +70,12 @@ pub enum Command {
         /// Where to save incoming files
         #[arg(long, default_value = "./zapsend-received")]
         dir: PathBuf,
+
+        /// Require a PIN for incoming transfers.
+        ///
+        /// Omit the value to generate a random 6-digit PIN and print it.
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "PIN")]
+        pin: Option<String>,
     },
 }
 
