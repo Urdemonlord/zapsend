@@ -36,6 +36,7 @@ pub struct AppState {
     pub download_dir: PathBuf,
     pub sessions: Mutex<HashMap<String, Session>>,
     pub pin: PinState,
+    pub ask: bool,
 }
 
 /// A 6-digit PIN is only 10^6 guesses, so the PIN is useless without a
@@ -159,6 +160,39 @@ struct PinQuery {
     pin: Option<String>,
 }
 
+/// One terminal, one prompt: serialise confirmations so two simultaneous
+/// transfers cannot interleave their questions.
+static STDIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn confirm(from: &str, files: &HashMap<String, FileMeta>) -> bool {
+    let mut listing = String::new();
+    for meta in files.values() {
+        listing.push_str(&format!(
+            "      {}  ({})\n",
+            meta.file_name,
+            crate::human_bytes(meta.size)
+        ));
+    }
+
+    let _guard = STDIN.lock().await;
+    print!(
+        "\n← {} file(s) from \"{from}\"\n{listing}  accept? [y/N] ",
+        files.len()
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // Reading stdin is blocking, and the handler must not stall the runtime.
+    match tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).map(|_| line)
+    })
+    .await
+    {
+        Ok(Ok(line)) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        _ => false,
+    }
+}
+
 async fn prepare_upload(
     State(state): State<Arc<AppState>>,
     Query(q): Query<PinQuery>,
@@ -181,6 +215,18 @@ async fn prepare_upload(
         return (code, msg).into_response();
     }
 
+    let from = req
+        .info
+        .as_ref()
+        .map(|i| i.alias.clone())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    if state.ask && !confirm(&from, &req.files).await {
+        eprintln!("✗ declined: {} file(s) from \"{from}\"", req.files.len());
+        return (StatusCode::FORBIDDEN, "declined by receiver".to_string()).into_response();
+    }
+
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut tokens = HashMap::new();
     let mut files = HashMap::new();
@@ -197,13 +243,6 @@ async fn prepare_upload(
         .lock()
         .unwrap()
         .insert(session_id.clone(), Session { files });
-
-    let from = req
-        .info
-        .as_ref()
-        .map(|i| i.alias.as_str())
-        .filter(|a| !a.is_empty())
-        .unwrap_or("unknown");
 
     eprintln!("→ incoming: {} file(s) from \"{}\"", count, from);
 

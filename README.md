@@ -110,10 +110,34 @@ zapsend receive --dir ~/Downloads
 # require a PIN — omit the value and one is generated for you
 zapsend receive --dir ~/Downloads --pin
 zapsend receive --dir ~/Downloads --pin 424242
+
+# confirm each transfer instead of accepting silently
+zapsend receive --dir ~/Downloads --ask
+```
+
+```
+  +--------------------------------------------+
+  | zapsend 0.0.1                              |
+  | headless file transfer, LocalSend protocol |
+  +--------------------------------------------+
+
+  listening   :53317
+  alias       thinkpad
+  fingerprint ab9628b112df49e2cafce94d17bb062a
+  pin         none — anyone on this network can send to you
+  saving to   /home/you/Downloads
+  mode        accept automatically
+
+  ctrl-c to stop
 ```
 
 Keeps running, announces itself on the network, and accepts incoming transfers.
 Now every phone on your LAN can push files to your NAS.
+
+Silent acceptance is the right default for a NAS or a server: nothing to approve,
+nothing to click. On a laptop you probably want `--ask` instead, which shows the
+sender and the file list and waits for `y`. It refuses to start if stdin is not a
+terminal, so it cannot hang under systemd.
 
 Printing the PIN is deliberate: it goes to your terminal, not to the network.
 Peers find out a PIN is required only when they get a `401`.
@@ -177,6 +201,8 @@ over a LAN is an afternoon script.
 - [ ] Folder transfer
 - [ ] Resume interrupted transfers
 - [x] PIN-protected receiving
+- [x] Interactive accept prompt (`--ask`)
+- [x] `--verbose` payload dumps for protocol debugging
 - [ ] `zapsend daemon` with a watch folder
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [ ] mDNS fallback for networks that block multicast

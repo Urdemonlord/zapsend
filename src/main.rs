@@ -12,6 +12,7 @@ use anyhow::{bail, Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -42,6 +43,7 @@ async fn start(
     port: u16,
     download_dir: PathBuf,
     pin: Option<String>,
+    ask: bool,
 ) -> Result<Stack> {
     let (identity, me) = identity::load_or_create(alias, port)?;
     let registry = discovery::new_registry();
@@ -52,6 +54,7 @@ async fn start(
         download_dir,
         sessions: Mutex::new(HashMap::new()),
         pin: server::PinState::new(pin),
+        ask,
     });
 
     let tls = RustlsConfig::from_pem(
@@ -115,7 +118,7 @@ async fn main() -> Result<()> {
             pin,
             scan,
         } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
-        Command::Receive { dir, pin } => receive(&alias, port, dir, pin).await,
+        Command::Receive { dir, pin, ask } => receive(&alias, port, dir, pin, ask).await,
     }
 }
 
@@ -165,7 +168,25 @@ fn print_peers(peers: &[Peer]) {
     }
 }
 
-fn human_bytes(n: u64) -> String {
+/// Printed once on startup. Plain ASCII, so it survives every terminal and
+/// every code page Windows can throw at it.
+fn banner() {
+    let lines = [
+        format!("zapsend {}", env!("CARGO_PKG_VERSION")),
+        "headless file transfer, LocalSend protocol".to_string(),
+    ];
+    let inner = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
+    let border = format!("  +{}+", "-".repeat(inner));
+
+    println!("{border}");
+    for line in &lines {
+        println!("  | {:w$} |", line, w = inner - 2);
+    }
+    println!("{border}");
+    println!();
+}
+
+pub fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = n as f64;
     let mut unit = 0;
@@ -191,7 +212,14 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
-    let stack = start(alias, port, PathBuf::from("./zapsend-received"), None).await?;
+    let stack = start(
+        alias,
+        port,
+        PathBuf::from("./zapsend-received"),
+        None,
+        false,
+    )
+    .await?;
     eprintln!("scanning for {wait}s…");
     let peers = scan(&stack, wait).await;
     print_peers(&peers);
@@ -251,7 +279,14 @@ async fn send(
             (stack, peer)
         }
         None => {
-            let stack = start(alias, port, PathBuf::from("./zapsend-received"), None).await?;
+            let stack = start(
+                alias,
+                port,
+                PathBuf::from("./zapsend-received"),
+                None,
+                false,
+            )
+            .await?;
             eprintln!("scanning for {scan_secs}s…");
             let peers = scan(&stack, scan_secs).await;
             let peer = match resolve_target(&peers, to.as_deref())? {
@@ -340,7 +375,13 @@ fn generate_pin() -> String {
         .collect()
 }
 
-async fn receive(alias: &str, port: u16, dir: PathBuf, pin: Option<String>) -> Result<()> {
+async fn receive(
+    alias: &str,
+    port: u16,
+    dir: PathBuf,
+    pin: Option<String>,
+    ask: bool,
+) -> Result<()> {
     let pin = match pin {
         None => None,
         Some(p) if p.is_empty() => Some(generate_pin()),
@@ -352,10 +393,15 @@ async fn receive(alias: &str, port: u16, dir: PathBuf, pin: Option<String>) -> R
         }
     };
 
-    std::fs::create_dir_all(&dir).context("creating download dir")?;
-    let stack = start(alias, port, dir.clone(), pin.clone()).await?;
+    if ask && !std::io::stdin().is_terminal() {
+        bail!("--ask needs an interactive terminal; drop it when running under a service manager");
+    }
 
-    println!("zapsend is listening on :{port}");
+    std::fs::create_dir_all(&dir).context("creating download dir")?;
+    let stack = start(alias, port, dir.clone(), pin.clone(), ask).await?;
+
+    banner();
+    println!("  listening   :{port}");
     println!("  alias       {}", stack.me.alias);
     println!("  fingerprint {}", stack.me.fingerprint);
     match pin {
@@ -363,8 +409,16 @@ async fn receive(alias: &str, port: u16, dir: PathBuf, pin: Option<String>) -> R
         None => println!("  pin         none — anyone on this network can send to you"),
     }
     println!("  saving to   {}", dir.display());
+    println!(
+        "  mode        {}",
+        if ask {
+            "ask before accepting"
+        } else {
+            "accept automatically"
+        }
+    );
     println!();
-    println!("ctrl-c to stop");
+    println!("  ctrl-c to stop");
 
     loop {
         if let Some(sock) = stack.sock.as_ref() {

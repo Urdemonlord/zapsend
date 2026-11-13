@@ -80,6 +80,10 @@ pub enum Command {
         /// Omit the value to generate a random 6-digit PIN and print it.
         #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "PIN")]
         pin: Option<String>,
+
+        /// Ask before accepting each transfer instead of accepting silently
+        #[arg(long)]
+        ask: bool,
     },
 }
 

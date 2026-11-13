@@ -223,6 +223,9 @@ pub async fn send_files(
             reqwest::StatusCode::TOO_MANY_REQUESTS => {
                 bail!("too many attempts, wait a minute: {body}")
             }
+            reqwest::StatusCode::FORBIDDEN => {
+                bail!("the receiver declined the transfer: {body}")
+            }
             _ => bail!("receiver rejected the transfer ({code}): {body}"),
         }
     }
