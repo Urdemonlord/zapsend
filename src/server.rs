@@ -293,6 +293,14 @@ async fn upload(
     }
 
     let path = unique_path(&state.download_dir, &meta.file_name);
+    if let Some(parent) = path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot create folder {}: {e}", parent.display()),
+            );
+        }
+    }
     let file = match tokio::fs::File::create(&path).await {
         Ok(f) => f,
         Err(e) => {
@@ -338,42 +346,68 @@ async fn upload(
     }
 }
 
-/// Never silently clobber an existing file: `a.txt` -> `a (1).txt`.
+/// Never silently clobber an existing file: `a.txt` -> `a (1).txt`, and keep
+/// the folder part a peer sent (`holiday/img.jpg`) instead of flattening it.
 fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
-    let safe = sanitize(file_name);
-    let mut candidate = dir.join(&safe);
+    let rel = safe_rel(file_name);
+    let mut candidate = dir.join(&rel);
     if !candidate.exists() {
         return candidate;
     }
 
-    let path = Path::new(&safe);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-    let ext = path.extension().and_then(|s| s.to_str());
+    let parent = candidate.parent().unwrap_or(dir).to_path_buf();
+    let stem = candidate
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let ext = candidate.extension().and_then(|s| s.to_str()).map(String::from);
 
     for n in 1..10_000 {
-        let name = match ext {
+        let name = match &ext {
             Some(ext) => format!("{stem} ({n}).{ext}"),
             None => format!("{stem} ({n})"),
         };
-        candidate = dir.join(name);
+        candidate = parent.join(name);
         if !candidate.exists() {
             return candidate;
         }
     }
-    dir.join(safe)
+    dir.join(rel)
 }
 
-/// Strip path separators and traversal so a peer cannot write outside our dir.
-fn sanitize(file_name: &str) -> String {
-    let base = file_name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(file_name)
-        .trim();
-    let cleaned: String = base.chars().filter(|c| !c.is_control()).collect();
-    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
-        "unnamed".to_string()
-    } else {
-        cleaned
+/// Keep the relative folders a peer sent, but drop anything that could escape
+/// our download dir: `..`, absolute roots, control characters, silly depth.
+fn safe_rel(file_name: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in file_name.split(['/', '\\']) {
+        let cleaned: String = part.trim().chars().filter(|c| !c.is_control()).collect();
+        if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+            continue;
+        }
+        if out.iter().count() >= 32 {
+            break;
+        }
+        out.push(cleaned);
+    }
+    if out.as_os_str().is_empty() {
+        out.push("unnamed");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_paths_stay_inside_the_download_dir() {
+        assert_eq!(safe_rel("holiday/img.jpg"), Path::new("holiday/img.jpg"));
+        assert_eq!(safe_rel("../../etc/passwd"), Path::new("etc/passwd"));
+        assert_eq!(safe_rel("/etc/passwd"), Path::new("etc/passwd"));
+        assert_eq!(safe_rel("a/../b.txt"), Path::new("a/b.txt"));
+        assert_eq!(safe_rel(".."), Path::new("unnamed"));
+        assert_eq!(safe_rel(""), Path::new("unnamed"));
+        assert_eq!(safe_rel("a\\b\\c.txt"), Path::new("a/b/c.txt"));
     }
 }

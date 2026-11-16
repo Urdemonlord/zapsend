@@ -106,6 +106,11 @@ zapsend send report.pdf --ip 192.168.1.42
 zapsend send report.pdf --ip 192.168.1.42:53400
 ```
 
+A folder argument is walked recursively and arrives with its tree intact:
+`zapsend send ./holiday --to pixel` lands as `holiday/2024/img.jpg` on the other
+side. Folders and single files mix freely in one command. Empty folders are not
+recreated — the protocol has no way to express a directory without files.
+
 The receiver shows a normal LocalSend prompt — accept it there and the files land.
 
 ### Receive files
@@ -204,7 +209,7 @@ over a LAN is an afternoon script.
 - [x] Configurable API port (two instances per machine)
 - [x] Multiple files per transfer
 - [x] Fingerprint pinning on send
-- [ ] Folder transfer
+- [x] Folder transfer
 - [ ] Resume interrupted transfers
 - [x] PIN-protected receiving
 - [x] Interactive accept prompt (`--ask`)

@@ -14,7 +14,7 @@ use clap::Parser;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -261,6 +261,55 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
     Ok(())
 }
 
+/// Turn the command-line arguments into one upload per file, walking folders.
+///
+/// A folder keeps its own name as a prefix (`holiday/img.jpg`), so the receiver
+/// rebuilds the tree instead of dumping a hundred loose files. Empty folders
+/// carry no files and are therefore not recreated — the protocol has no way to
+/// express a directory on its own.
+fn collect_uploads(paths: &[PathBuf]) -> Result<Vec<client::Upload>> {
+    let mut out = Vec::new();
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .with_context(|| format!("invalid name: {}", path.display()))?
+            .to_string();
+        if path.is_dir() {
+            walk_dir(path, &name, &mut out)?;
+        } else {
+            out.push(client::Upload {
+                path: path.clone(),
+                name,
+            });
+        }
+    }
+    if out.is_empty() {
+        bail!("nothing to send");
+    }
+    Ok(out)
+}
+
+fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<client::Upload>) -> Result<()> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("cannot read folder {}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
+    entries.sort();
+    for path in entries {
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let remote = format!("{prefix}/{name}");
+        if path.is_dir() {
+            walk_dir(&path, &remote, out)?;
+        } else {
+            out.push(client::Upload { path, name: remote });
+        }
+    }
+    Ok(())
+}
+
 /// Accept `1.2.3.4` or `1.2.3.4:53400`.
 fn parse_target(raw: &str) -> Result<(IpAddr, u16)> {
     match raw.rsplit_once(':') {
@@ -345,15 +394,16 @@ async fn send(
         }
     };
 
-    let bytes: u64 = files
+    let uploads = collect_uploads(&files)?;
+    let bytes: u64 = uploads
         .iter()
-        .filter_map(|f| std::fs::metadata(f).ok())
+        .filter_map(|u| std::fs::metadata(&u.path).ok())
         .map(|m| m.len())
         .sum();
 
     eprintln!(
         "sending {} file(s), {} to \"{}\" ({}:{})",
-        files.len(),
+        uploads.len(),
         human_bytes(bytes),
         peer.info.alias,
         peer.ip,
@@ -368,7 +418,7 @@ async fn send(
         );
     }
 
-    client::send_files(&peer, &stack.me, &files, pin.as_deref()).await?;
+    client::send_files(&peer, &stack.me, &uploads, pin.as_deref()).await?;
     println!("✓ done");
     Ok(())
 }

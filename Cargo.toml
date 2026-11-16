@@ -1,6 +1,6 @@
 [package]
 name = "zapsend"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2021"
 rust-version = "1.75"
 description = "Headless, LocalSend-compatible file transfer over your local network"

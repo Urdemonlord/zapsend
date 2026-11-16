@@ -124,13 +124,20 @@ struct Pending {
 /// commonly serve plain HTTP. A `--ip` target has no announcement to read that
 /// field from, so we probe: one failed handshake is cheaper than asking the
 /// user to discover a flag they cannot see.
+/// One file to upload: the local path, and the name the peer will see. A name
+/// may carry `/` separators to land inside a folder on the receiver.
+pub struct Upload {
+    pub path: PathBuf,
+    pub name: String,
+}
+
 pub async fn send_files(
     peer: &Peer,
     me: &DeviceInfo,
-    paths: &[PathBuf],
+    uploads: &[Upload],
     pin: Option<&str>,
 ) -> Result<()> {
-    match send_files_over(peer, me, paths, pin).await {
+    match send_files_over(peer, me, uploads, pin).await {
         Err(e) if looks_like_scheme_mismatch(&e) => {
             let mut flipped = peer.clone();
             flipped.info.protocol = if peer.info.protocol.eq_ignore_ascii_case("http") {
@@ -142,7 +149,7 @@ pub async fn send_files(
                 "! {} did not answer over {} — retrying over {}",
                 peer.ip, peer.info.protocol, flipped.info.protocol
             );
-            send_files_over(&flipped, me, paths, pin).await
+            send_files_over(&flipped, me, uploads, pin).await
         }
         other => other,
     }
@@ -161,32 +168,21 @@ fn looks_like_scheme_mismatch(e: &anyhow::Error) -> bool {
 async fn send_files_over(
     peer: &Peer,
     me: &DeviceInfo,
-    paths: &[PathBuf],
+    uploads: &[Upload],
     pin: Option<&str>,
 ) -> Result<()> {
-    if paths.is_empty() {
+    if uploads.is_empty() {
         bail!("no files to send");
     }
 
     let mut pending = Vec::new();
-    for (idx, path) in paths.iter().enumerate() {
-        let meta =
-            std::fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
-        if meta.is_dir() {
-            bail!(
-                "{} is a directory — folder transfer is not implemented yet",
-                path.display()
-            );
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .with_context(|| format!("invalid file name: {}", path.display()))?
-            .to_string();
+    for (idx, upload) in uploads.iter().enumerate() {
+        let meta = std::fs::metadata(&upload.path)
+            .with_context(|| format!("cannot read {}", upload.path.display()))?;
         pending.push(Pending {
             id: idx.to_string(),
-            path: path.clone(),
-            name,
+            path: upload.path.clone(),
+            name: upload.name.clone(),
             size: meta.len(),
         });
     }
