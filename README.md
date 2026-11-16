@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="ZapSend" width="360">
+</p>
+
 # zapsend
 
 **Headless, LocalSend-compatible file transfer over your local network.**
@@ -118,6 +122,8 @@ The receiver shows a normal LocalSend prompt — accept it there and the files l
 ```sh
 zapsend ui --dir ~/Downloads
 ```
+
+<img src="docs/ui.png" alt="ZapSend web UI: device list, drop zone, send button" width="640">
 
 Starts the normal receiver plus a page on `http://127.0.0.1:53318/` (plain
 HTTP on loopback, so no certificate warning; peers still get HTTPS on 53317).
@@ -262,6 +268,31 @@ and discover announce a free port instead and keep working.
 
 **Receiver rejects the transfer.** Some LocalSend configurations require
 accepting manually. Check the screen of the receiving device.
+
+## Brand
+
+The mark is a Z built from two arrows — one leaving, one arriving — with speed
+dashes for the "zap". All of it is vector, and the wordmark is outlines rather
+than live text, so the logo renders identically with no font installed.
+
+| File | Use |
+| --- | --- |
+| `assets/logo.svg` | Lockup on a dark card (README, slides) |
+| `assets/logo-mark.svg` | Icon only, transparent — UI, favicon, docs |
+| `assets/wordmark.svg` | Wordmark only, transparent |
+| `assets/app-icon-dark.svg` / `-light.svg` | App icon, dark and light |
+| `assets/monochrome-dark.svg` / `-light.svg` | One-ink versions |
+| `assets/avatar.svg` | Circular GitHub avatar |
+| `assets/*.png` | 1024 px raster exports of the above |
+
+Palette: `#20E889` primary, `#087F68` secondary, `#F8FAFC` text, `#0B0F10`
+background. The mark's gradient runs from primary at the top-right arrowhead to
+secondary at the bottom-left. The light app icon deliberately uses flat
+background ink on primary green instead of the gradient — a mint gradient on a
+mint tile would disappear.
+
+`zapsend ui` serves the icon at `/favicon.svg`; the terminal banner uses the
+brand colours when stdout is a terminal and `NO_COLOR` is unset.
 
 ## License
 

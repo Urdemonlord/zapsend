@@ -10,7 +10,7 @@ use crate::protocol::Peer;
 use crate::server::AppState;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{Html, Json};
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -32,6 +32,7 @@ type Fail = (StatusCode, String);
 pub fn router(state: Arc<UiState>) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/favicon.svg", get(favicon))
         .route("/ui/state", get(state_of_things))
         .route("/ui/stage", put(stage).delete(clear_staging))
         .route("/ui/send", post(send))
@@ -40,6 +41,13 @@ pub fn router(state: Arc<UiState>) -> Router {
 
 async fn index() -> Html<&'static str> {
     Html(PAGE)
+}
+
+async fn favicon() -> impl axum::response::IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../assets/favicon.svg"),
+    )
 }
 
 #[derive(Serialize)]

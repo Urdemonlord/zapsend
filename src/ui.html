@@ -2,34 +2,42 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>zapsend</title>
+<title>ZapSend</title>
+<meta name="theme-color" content="#0B0F10">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <style>
-  :root { color-scheme: dark; --bg:#111316; --panel:#181b1f; --line:#2a2f36; --dim:#8b949e; --accent:#4ade80; --warn:#f87171; }
+  :root { color-scheme: dark; --bg:#0B0F10; --panel:#12171A; --line:#222C2E; --dim:#8A9698; --accent:#20E889; --warn:#F87171; --ink:#F8FAFC; --control-h:36px; }
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:#e6edf3; }
+  body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
   header { display:flex; gap:18px; align-items:baseline; padding:16px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
-  header b { font-size:16px; }
   header span { color:var(--dim); font-size:12px; }
-  main { display:grid; grid-template-columns: 300px 1fr; gap:16px; padding:16px 20px; align-items:start; }
+  .brand { display:flex; align-items:center; gap:9px; }
+  .brand svg { height:20px; width:auto; display:block; }
+  .brand b { font-size:17px; font-weight:800; font-style:italic; letter-spacing:-.02em; color:var(--ink); }
+  .brand b em { font-style:inherit; color:var(--accent); }
+  main { display:grid; grid-template-columns: 300px 1fr; gap:16px; padding:16px 20px; align-items:stretch; }
   @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
-  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; display:flex; flex-direction:column; }
   h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:600; }
+  #devices { flex:1; display:flex; flex-direction:column; }
   .dev { display:flex; gap:10px; align-items:center; padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; cursor:pointer; }
   .dev:hover { border-color:#3d4650; }
-  .dev.sel { border-color:var(--accent); background:#15251b; }
+  .dev.sel { border-color:var(--accent); background:#0E2A1F; }
   .dev .meta { min-width:0; }
   .dev .alias { font-weight:600; }
   .dev .addr { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #drop { border:1.5px dashed #3a424c; border-radius:10px; padding:22px 12px; text-align:center; color:var(--dim); }
-  #drop.hot { border-color:var(--accent); color:var(--accent); background:#15251b; }
-  #drop b { color:#e6edf3; }
-  textarea { width:100%; min-height:64px; margin-top:12px; background:#0e1114; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px; font-family:ui-monospace, monospace; font-size:12px; resize:vertical; }
+  #drop { border:1.5px dashed #46524F; border-radius:10px; padding:22px 12px; text-align:center; color:var(--dim); }
+  #drop.hot { border-color:var(--accent); color:var(--accent); background:#0E2A1F; }
+  #drop b { color:var(--ink); }
+  textarea { width:100%; min-height:64px; margin-top:12px; background:#0A0E0F; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px; font-family:ui-monospace, monospace; font-size:12px; resize:vertical; }
   .row { display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap; }
-  button { background:#242a31; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button { background:#1A2224; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:0 14px; height:var(--control-h); font:inherit; cursor:pointer; }
   button:hover:not(:disabled) { border-color:#4a5560; }
-  button.primary { background:var(--accent); border-color:var(--accent); color:#08130c; font-weight:600; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#04150E; font-weight:600; }
   button:disabled { opacity:.45; cursor:default; }
-  input[type=text] { background:#0e1114; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px; width:110px; font:inherit; }
+  input[type=text] { background:#0A0E0F; color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:0 8px; height:var(--control-h); width:110px; font:inherit; }
+  ::placeholder { color:#6F7B7D; opacity:1; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   .chip { display:inline-block; padding:3px 8px; border:1px solid var(--line); border-radius:999px; font-size:12px; color:var(--dim); margin:0 6px 6px 0; font-family:ui-monospace, monospace; }
   #status { margin-top:12px; min-height:20px; font-size:13px; }
   #status.err { color:var(--warn); }
@@ -39,8 +47,9 @@
 </head>
 <body>
 <header>
-  <b id="alias">zapsend</b>
+  <span class="brand"><svg viewBox="4 5.93 113.95 68.06" aria-hidden="true"><defs><linearGradient id="hg" x1="1" y1="0" x2="0.3" y2="0.9"><stop offset="0" stop-color="#20E889"/><stop offset="1" stop-color="#12A574"/></linearGradient></defs><g fill="url(#hg)"><path d="M40 14h46v14H40z"/><path d="M38 52h52v14H38z"/><path d="M85.2 12.8 30.2 56.2l8.6 11 55-43.4z"/><path d="M86 6v30l26-15z"/><path d="M38 44v30L12 59z"/></g><g fill="#087F68"><rect x="14" y="22" width="22" height="5" rx="2.5"/><rect x="4" y="34" width="18" height="5" rx="2.5"/><rect x="100" y="42" width="18" height="5" rx="2.5"/><rect x="96" y="56" width="14" height="5" rx="2.5"/></g></svg><b>Zap<em>Send</em></b></span>
   <span id="where">…</span>
+  <span id="alias"></span>
   <span id="pinbadge"></span>
 </header>
 
@@ -52,7 +61,7 @@
 
   <section>
     <h2>Send</h2>
-    <div id="drop">Drop files here, or <b>click to pick</b><br><span class="muted">folders keep their tree when you type a path below</span></div>
+    <div id="drop" role="button" tabindex="0" aria-label="Choose files to send">Drop files here, or <b>choose files</b><br><span class="muted">folders keep their tree when you type a path below</span></div>
     <input type="file" id="picker" multiple hidden>
     <div id="staged"></div>
     <textarea id="paths" placeholder="…or absolute paths, one per line&#10;C:\Users\click\Pictures\holiday&#10;/home/me/notes.pdf"></textarea>
@@ -88,12 +97,13 @@ async function refresh() {
     return;
   }
   $('#alias').textContent = state.alias;
-  $('#where').textContent = `:${state.port} · saving to ${state.download_dir}`;
+  $('#where').textContent = `localhost:${state.port} · saving to ${state.download_dir}`;
   $('#pinbadge').textContent = state.pin_required ? 'PIN required' : '';
+  $('#clear').disabled = !state.staged.length;
 
   const list = $('#devices');
   if (!state.devices.length) {
-    list.innerHTML = '<div class="muted">nothing yet — make sure LocalSend is open on the other device</div>';
+    list.innerHTML = '<div class="muted" style="margin:auto;text-align:center">nothing yet — make sure LocalSend is open on the other device</div>';
   } else {
     if (!selected || !state.devices.some(d => d.fingerprint === selected)) selected = state.devices[0].fingerprint;
     list.innerHTML = state.devices.map(d => `
@@ -122,6 +132,9 @@ async function upload(files) {
 
 const drop = $('#drop');
 drop.onclick = () => $('#picker').click();
+drop.onkeydown = e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#picker').click(); }
+};
 $('#picker').onchange = e => upload(e.target.files);
 drop.ondragover = e => { e.preventDefault(); drop.classList.add('hot'); };
 drop.ondragleave = () => drop.classList.remove('hot');

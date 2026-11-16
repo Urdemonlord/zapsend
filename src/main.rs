@@ -225,18 +225,27 @@ fn print_peers(peers: &[Peer]) {
 /// Printed once on startup. Plain ASCII, so it survives every terminal and
 /// every code page Windows can throw at it.
 fn banner() {
-    let lines = [
-        format!("zapsend {}", env!("CARGO_PKG_VERSION")),
-        "headless file transfer, LocalSend protocol".to_string(),
-    ];
-    let inner = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 2;
-    let border = format!("  +{}+", "-".repeat(inner));
+    use std::io::IsTerminal;
 
-    println!("{border}");
-    for line in &lines {
-        println!("  | {:w$} |", line, w = inner - 2);
-    }
-    println!("{border}");
+    // Colour only when a human is looking; pipes and logs get plain text.
+    let plain = !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some();
+    let (bold_white, bold_green, green, dim, reset) = if plain {
+        ("", "", "", "", "")
+    } else {
+        (
+            "\x1b[1;3;38;2;248;250;252m",
+            "\x1b[1;3;38;2;32;232;137m",
+            "\x1b[1;38;2;32;232;137m",
+            "\x1b[2m",
+            "\x1b[0m",
+        )
+    };
+
+    println!(
+        "  {green}⇄{reset}  {bold_white}Zap{bold_green}Send{reset} {dim}{}{reset}",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!("     {dim}headless file transfer, LocalSend protocol{reset}");
     println!();
 }
 
