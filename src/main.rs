@@ -37,21 +37,55 @@ fn local_only(alias: &str, port: u16) -> Result<Stack> {
     })
 }
 
+/// How badly a command needs the HTTPS API server.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApiServer {
+    /// `receive`: a receiver that cannot listen is useless, so a busy port is
+    /// fatal instead of a half-working instance.
+    Required,
+    /// `discover` and `send --to`: peers only answer an announcement by calling
+    /// `POST /register` back on the announced port. Losing that listener makes
+    /// the scan blind, but a port already held by another instance must not
+    /// kill the command — so take any free port and announce that one.
+    Want,
+}
+
 /// Full stack: HTTPS API server + multicast discovery.
-///
-/// `serve_api: false` is for `send`/`discover`, which need an identity and
-/// discovery but never serve a file. They used to die on a busy port, which
-/// made `send` unusable while a `receive` instance was running.
 async fn start(
     alias: &str,
     port: u16,
     download_dir: PathBuf,
     pin: Option<String>,
     ask: bool,
-    serve_api: bool,
+    api: ApiServer,
 ) -> Result<Stack> {
-    let (identity, me) = identity::load_or_create(alias, port)?;
+    let (identity, mut me) = identity::load_or_create(alias, port)?;
     let registry = discovery::new_registry();
+
+    let tls = RustlsConfig::from_pem(
+        identity.cert_pem.into_bytes(),
+        identity.key_pem.into_bytes(),
+    )
+    .await
+    .context("building TLS config")?;
+
+    // Bind before spawning so a taken port fails loudly here instead of
+    // silently leaving a receiver that claims to listen but never does.
+    let listener = match std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))) {
+        Ok(l) => Some(l),
+        Err(e) if api == ApiServer::Required => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "cannot bind the API server to :{port} — another instance already holds it"
+            )));
+        }
+        Err(_) => {
+            let l = std::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0)))?;
+            let actual = l.local_addr()?.port();
+            eprintln!("! port :{port} is in use — announcing :{actual} instead");
+            me.port = actual;
+            Some(l)
+        }
+    };
 
     let state = Arc::new(server::AppState {
         me: me.clone(),
@@ -61,41 +95,18 @@ async fn start(
         pin: server::PinState::new(pin),
         ask,
     });
-
-    let tls = RustlsConfig::from_pem(
-        identity.cert_pem.into_bytes(),
-        identity.key_pem.into_bytes(),
-    )
-    .await
-    .context("building TLS config")?;
-
     let app = server::router(state);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    // Bind before spawning so a taken port fails loudly here instead of
-    // silently leaving a receiver that claims to listen but never does.
-    // A sender/discoverer has nothing to serve, so a busy port there is not
-    // fatal: warn and carry on with discovery only.
-    match std::net::TcpListener::bind(addr) {
-        Ok(listener) => {
-            listener.set_nonblocking(true)?;
-            tokio::spawn(async move {
-                if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
-                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                    .await
-                {
-                    eprintln!("! API server stopped: {e}");
-                }
-            });
-        }
-        Err(e) if serve_api => {
-            return Err(anyhow::Error::new(e).context(format!(
-                "cannot bind the API server to :{port} — another instance already holds it"
-            )));
-        }
-        Err(_) => {
-            eprintln!("! port :{port} is in use — continuing without the API server");
-        }
+    if let Some(listener) = listener {
+        listener.set_nonblocking(true)?;
+        tokio::spawn(async move {
+            if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+            {
+                eprintln!("! API server stopped: {e}");
+            }
+        });
     }
 
     let sock = Arc::new(discovery::bind_multicast()?);
@@ -233,7 +244,7 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
         PathBuf::from("./zapsend-received"),
         None,
         false,
-        false,
+        ApiServer::Want,
     )
     .await?;
     eprintln!("scanning for {wait}s…");
@@ -301,7 +312,7 @@ async fn send(
                 PathBuf::from("./zapsend-received"),
                 None,
                 false,
-                false,
+                ApiServer::Want,
             )
             .await?;
             eprintln!("scanning for {scan_secs}s…");
@@ -415,7 +426,7 @@ async fn receive(
     }
 
     std::fs::create_dir_all(&dir).context("creating download dir")?;
-    let stack = start(alias, port, dir.clone(), pin.clone(), ask, true).await?;
+    let stack = start(alias, port, dir.clone(), pin.clone(), ask, ApiServer::Required).await?;
 
     banner();
     println!("  listening   :{port}");
