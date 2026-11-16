@@ -118,7 +118,47 @@ struct Pending {
     size: u64,
 }
 
+/// Send, retrying once over the other scheme when the peer refuses our TLS.
+///
+/// LocalSend v2 lets a device advertise `protocol: http | https`, and phones
+/// commonly serve plain HTTP. A `--ip` target has no announcement to read that
+/// field from, so we probe: one failed handshake is cheaper than asking the
+/// user to discover a flag they cannot see.
 pub async fn send_files(
+    peer: &Peer,
+    me: &DeviceInfo,
+    paths: &[PathBuf],
+    pin: Option<&str>,
+) -> Result<()> {
+    match send_files_over(peer, me, paths, pin).await {
+        Err(e) if looks_like_scheme_mismatch(&e) => {
+            let mut flipped = peer.clone();
+            flipped.info.protocol = if peer.info.protocol.eq_ignore_ascii_case("http") {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            };
+            eprintln!(
+                "! {} did not answer over {} — retrying over {}",
+                peer.ip, peer.info.protocol, flipped.info.protocol
+            );
+            send_files_over(&flipped, me, paths, pin).await
+        }
+        other => other,
+    }
+}
+
+/// A plaintext peer answers our TLS ClientHello with garbage, which rustls
+/// reports as a corrupt record rather than a connect error.
+fn looks_like_scheme_mismatch(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}").to_lowercase();
+    msg.contains("invalidcontenttype")
+        || msg.contains("corrupt message")
+        || msg.contains("handshake failure")
+        || msg.contains("received corrupt message")
+}
+
+async fn send_files_over(
     peer: &Peer,
     me: &DeviceInfo,
     paths: &[PathBuf],
@@ -173,7 +213,6 @@ pub async fn send_files(
     spinner.finish_and_clear();
 
     let http = if peer.info.fingerprint.is_empty() {
-        eprintln!("! no fingerprint for this peer — TLS certificate is NOT verified");
         unpinned_client()?
     } else {
         pinned_client(&peer.info.fingerprint)?
