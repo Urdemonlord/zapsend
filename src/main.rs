@@ -38,12 +38,17 @@ fn local_only(alias: &str, port: u16) -> Result<Stack> {
 }
 
 /// Full stack: HTTPS API server + multicast discovery.
+///
+/// `serve_api: false` is for `send`/`discover`, which need an identity and
+/// discovery but never serve a file. They used to die on a busy port, which
+/// made `send` unusable while a `receive` instance was running.
 async fn start(
     alias: &str,
     port: u16,
     download_dir: PathBuf,
     pin: Option<String>,
     ask: bool,
+    serve_api: bool,
 ) -> Result<Stack> {
     let (identity, me) = identity::load_or_create(alias, port)?;
     let registry = discovery::new_registry();
@@ -69,25 +74,35 @@ async fn start(
 
     // Bind before spawning so a taken port fails loudly here instead of
     // silently leaving a receiver that claims to listen but never does.
-    let listener = std::net::TcpListener::bind(addr).with_context(|| {
-        format!("cannot bind the API server to :{port} — another instance already holds it")
-    })?;
-    listener.set_nonblocking(true)?;
-
-    tokio::spawn(async move {
-        if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-        {
-            eprintln!("! API server stopped: {e}");
+    // A sender/discoverer has nothing to serve, so a busy port there is not
+    // fatal: warn and carry on with discovery only.
+    match std::net::TcpListener::bind(addr) {
+        Ok(listener) => {
+            listener.set_nonblocking(true)?;
+            tokio::spawn(async move {
+                if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                {
+                    eprintln!("! API server stopped: {e}");
+                }
+            });
         }
-    });
+        Err(e) if serve_api => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "cannot bind the API server to :{port} — another instance already holds it"
+            )));
+        }
+        Err(_) => {
+            eprintln!("! port :{port} is in use — continuing without the API server");
+        }
+    }
 
     let sock = Arc::new(discovery::bind_multicast()?);
     tokio::spawn(discovery::listen(
         sock.clone(),
         registry.clone(),
-        me.fingerprint.clone(),
+        me.clone(),
     ));
 
     Ok(Stack {
@@ -218,6 +233,7 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
         PathBuf::from("./zapsend-received"),
         None,
         false,
+        false,
     )
     .await?;
     eprintln!("scanning for {wait}s…");
@@ -284,6 +300,7 @@ async fn send(
                 port,
                 PathBuf::from("./zapsend-received"),
                 None,
+                false,
                 false,
             )
             .await?;
@@ -398,7 +415,7 @@ async fn receive(
     }
 
     std::fs::create_dir_all(&dir).context("creating download dir")?;
-    let stack = start(alias, port, dir.clone(), pin.clone(), ask).await?;
+    let stack = start(alias, port, dir.clone(), pin.clone(), ask, true).await?;
 
     banner();
     println!("  listening   :{port}");

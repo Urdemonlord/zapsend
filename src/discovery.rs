@@ -36,8 +36,10 @@ pub fn bind_multicast() -> Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
         .context("creating UDP socket")?;
     sock.set_reuse_address(true)?;
-    #[cfg(unix)]
-    sock.set_reuse_port(true)?;
+    // No SO_REUSEPORT on purpose: on Linux it load-balances multicast datagrams
+    // between sockets bound to the same port, so a `send` running next to a
+    // `receive` steals each other's announcements and discovery goes quiet.
+    // SO_REUSEADDR alone lets both bind and both receive the group traffic.
     sock.set_nonblocking(true)?;
 
     let addr: SocketAddr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, MULTICAST_PORT));
@@ -69,7 +71,7 @@ pub async fn announce(sock: &UdpSocket, me: &DeviceInfo) -> Result<()> {
 }
 
 /// Read multicast traffic forever and record every device we see.
-pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, my_fingerprint: String) {
+pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, me: DeviceInfo) {
     let mut buf = vec![0u8; 16 * 1024];
 
     loop {
@@ -86,9 +88,13 @@ pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, my_fingerprint: St
             continue;
         };
 
-        // Empty fingerprint means it is not a real peer; our own fingerprint
-        // means we are hearing our own announcement echo back.
-        if info.fingerprint.is_empty() || info.fingerprint == my_fingerprint {
+        // Empty fingerprint means it is not a real peer. Our own echo carries
+        // both our fingerprint *and* our alias: two instances on one machine
+        // share a certificate (identity is per-port), so matching on the
+        // fingerprint alone would hide a legitimate local peer.
+        if info.fingerprint.is_empty()
+            || (info.fingerprint == me.fingerprint && info.alias == me.alias)
+        {
             continue;
         }
 
