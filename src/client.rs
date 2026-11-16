@@ -205,7 +205,7 @@ async fn send_files_over(
                 id: item.id.clone(),
                 file_name: item.name.clone(),
                 size: item.size,
-                file_type: None,
+                file_type: Some(mime_for(&item.name)),
                 sha256: Some(sha),
             },
         );
@@ -327,6 +327,37 @@ async fn send_files_over(
 
     overall.finish_and_clear();
     Ok(())
+}
+
+/// `fileType` is mandatory in the receiver's schema — LocalSend's `FileDto`
+/// has no default for it, so omitting the field makes the whole request fail to
+/// parse and the peer answers `400 Invalid JSON body`.
+///
+/// ponytail: a short extension table; swap in `mime_guess` if exotic types start
+/// mattering (only the receiver's icon/preview choice depends on this).
+fn mime_for(name: &str) -> String {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "zip" => "application/zip",
+        "apk" => "application/vnd.android.package-archive",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
