@@ -73,8 +73,14 @@ sending 3 file(s), 13.3 MiB to "nas" (192.168.1.77:53400)
 ✓ wrong fingerprint was refused
 ```
 
-If your network blocks multicast (guest wifi, corporate VLAN, many VMs), the
-script detects that and falls back to `--ip`, printing why.
+If your network blocks multicast (guest wifi, corporate VLAN, many VMs, a phone
+hotspot), the script detects that and falls back to `--ip`, printing why.
+
+`discover` and `send --to` do the same thing automatically: when nothing answers
+multicast, they unicast `POST /register` to every host on their own `/24` (the
+spec's legacy discovery), which gets through where multicast does not. If the
+default port is already held — usually by a running `receive` — they announce a
+free port instead of going blind.
 
 ## Usage
 
@@ -157,7 +163,7 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 
 | Piece | What zapsend does |
 |---|---|
-| Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake |
+| Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake; `/24` unicast sweep when multicast is blocked |
 | Identity | Self-signed cert; the sender pins the peer's SHA-256 fingerprint |
 | Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
 | Ports | Multicast always `53317`; API port configurable via `--port` |

@@ -160,6 +160,14 @@ async fn scan(stack: &Stack, secs: u64) -> Vec<Peer> {
         tokio::time::sleep(Duration::from_millis(800)).await;
     }
 
+    // Multicast is the happy path; the /24 sweep is what saves a tethered
+    // laptop, a guest network or an AP with client isolation.
+    if stack.registry.lock().unwrap().is_empty() {
+        if let Err(e) = discovery::sweep(&stack.registry, &stack.me).await {
+            eprintln!("! subnet sweep failed: {e}");
+        }
+    }
+
     let mut peers = {
         let reg = stack.registry.lock().unwrap();
         reg.values().cloned().collect::<Vec<_>>()
