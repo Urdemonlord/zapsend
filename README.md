@@ -113,6 +113,22 @@ recreated — the protocol has no way to express a directory without files.
 
 The receiver shows a normal LocalSend prompt — accept it there and the files land.
 
+### Browse and send from a browser
+
+```sh
+zapsend ui --dir ~/Downloads
+```
+
+Starts the normal receiver plus a page on `http://127.0.0.1:53318/` (plain
+HTTP on loopback, so no certificate warning; peers still get HTTPS on 53317).
+The page lists discovered devices, takes drag & drop or absolute paths, and
+sends. Dropped files are staged to a temp dir first — browsers hand over bytes,
+never a path — so drop a folder as a path if you want its tree preserved.
+
+```sh
+zapsend ui --ui-port 8080 --no-open    # different page port, don't launch a browser
+```
+
 ### Receive files
 
 ```sh
@@ -214,6 +230,7 @@ over a LAN is an afternoon script.
 - [x] PIN-protected receiving
 - [x] Interactive accept prompt (`--ask`)
 - [x] `--verbose` payload dumps for protocol debugging
+- [x] Local web UI (`zapsend ui`)
 - [ ] `zapsend daemon` with a watch folder
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)

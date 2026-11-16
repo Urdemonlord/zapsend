@@ -4,6 +4,7 @@ mod discovery;
 mod identity;
 mod protocol;
 mod server;
+mod ui;
 mod verbose;
 
 use crate::cli::{Cli, Command};
@@ -24,22 +25,34 @@ struct Stack {
     registry: discovery::Registry,
     /// `None` when we skip networking (sending straight to an --ip target).
     sock: Option<Arc<tokio::net::UdpSocket>>,
+    /// The same state the HTTPS server runs on; the web UI reads it directly.
+    state: Arc<server::AppState>,
 }
 
 /// Identity only — no listeners. Used by `send --ip`, which does not need to
 /// be discoverable itself and therefore never fights another instance for a port.
 fn local_only(alias: &str, port: u16) -> Result<Stack> {
     let (_, me) = identity::load_or_create(alias, port)?;
+    let registry = discovery::new_registry();
+    let state = Arc::new(server::AppState {
+        me: me.clone(),
+        registry: registry.clone(),
+        download_dir: PathBuf::from("./zapsend-received"),
+        sessions: Mutex::new(HashMap::new()),
+        pin: server::PinState::new(None),
+        ask: false,
+    });
     Ok(Stack {
         me,
-        registry: discovery::new_registry(),
+        registry,
         sock: None,
+        state,
     })
 }
 
 /// How badly a command needs the HTTPS API server.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ApiServer {
+pub(crate) enum ApiServer {
     /// `receive`: a receiver that cannot listen is useless, so a busy port is
     /// fatal instead of a half-working instance.
     Required,
@@ -51,7 +64,7 @@ enum ApiServer {
 }
 
 /// Full stack: HTTPS API server + multicast discovery.
-async fn start(
+pub(crate) async fn start(
     alias: &str,
     port: u16,
     download_dir: PathBuf,
@@ -95,7 +108,7 @@ async fn start(
         pin: server::PinState::new(pin),
         ask,
     });
-    let app = server::router(state);
+    let app = server::router(state.clone());
 
     if let Some(listener) = listener {
         listener.set_nonblocking(true)?;
@@ -120,6 +133,7 @@ async fn start(
         me,
         registry,
         sock: Some(sock),
+        state,
     })
 }
 
@@ -145,6 +159,12 @@ async fn main() -> Result<()> {
             scan,
         } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
         Command::Receive { dir, pin, ask } => receive(&alias, port, dir, pin, ask).await,
+        Command::Ui {
+            dir,
+            pin,
+            ui_port,
+            no_open,
+        } => ui::run(&alias, port, dir, pin, ui_port, no_open).await,
     }
 }
 
@@ -163,7 +183,7 @@ async fn scan(stack: &Stack, secs: u64) -> Vec<Peer> {
     // Multicast is the happy path; the /24 sweep is what saves a tethered
     // laptop, a guest network or an AP with client isolation.
     if stack.registry.lock().unwrap().is_empty() {
-        if let Err(e) = discovery::sweep(&stack.registry, &stack.me).await {
+        if let Err(e) = discovery::sweep(&stack.registry, &stack.me, false).await {
             eprintln!("! subnet sweep failed: {e}");
         }
     }
@@ -267,7 +287,7 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
 /// rebuilds the tree instead of dumping a hundred loose files. Empty folders
 /// carry no files and are therefore not recreated — the protocol has no way to
 /// express a directory on its own.
-fn collect_uploads(paths: &[PathBuf]) -> Result<Vec<client::Upload>> {
+pub(crate) fn collect_uploads(paths: &[PathBuf]) -> Result<Vec<client::Upload>> {
     let mut out = Vec::new();
     for path in paths {
         let name = path
@@ -311,7 +331,7 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<client::Upload>) -> Result<(
 }
 
 /// Accept `1.2.3.4` or `1.2.3.4:53400`.
-fn parse_target(raw: &str) -> Result<(IpAddr, u16)> {
+pub(crate) fn parse_target(raw: &str) -> Result<(IpAddr, u16)> {
     match raw.rsplit_once(':') {
         Some((ip, port)) => {
             let addr = ip
@@ -452,7 +472,7 @@ fn resolve_target(peers: &[Peer], target: Option<&str>) -> Result<Option<Peer>> 
 
 /// Six digits from an OS-random UUID. No new dependency: uuid v4 already
 /// pulls entropy from the platform.
-fn generate_pin() -> String {
+pub(crate) fn generate_pin() -> String {
     uuid::Uuid::new_v4()
         .as_bytes()
         .iter()

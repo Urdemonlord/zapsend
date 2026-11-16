@@ -85,6 +85,25 @@ pub enum Command {
         #[arg(long)]
         ask: bool,
     },
+
+    /// Browse devices and send from a local web page
+    Ui {
+        /// Where to save incoming files
+        #[arg(long, default_value = "./zapsend-received")]
+        dir: PathBuf,
+
+        /// Require a PIN for incoming transfers (omit the value to generate one)
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "PIN")]
+        pin: Option<String>,
+
+        /// Loopback port for the page itself
+        #[arg(long, default_value_t = 53318)]
+        ui_port: u16,
+
+        /// Do not open the browser automatically
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 fn default_alias() -> String {

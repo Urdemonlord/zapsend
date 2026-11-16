@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>zapsend</title>
+<style>
+  :root { color-scheme: dark; --bg:#111316; --panel:#181b1f; --line:#2a2f36; --dim:#8b949e; --accent:#4ade80; --warn:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:#e6edf3; }
+  header { display:flex; gap:18px; align-items:baseline; padding:16px 20px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header b { font-size:16px; }
+  header span { color:var(--dim); font-size:12px; }
+  main { display:grid; grid-template-columns: 300px 1fr; gap:16px; padding:16px 20px; align-items:start; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:600; }
+  .dev { display:flex; gap:10px; align-items:center; padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:8px; cursor:pointer; }
+  .dev:hover { border-color:#3d4650; }
+  .dev.sel { border-color:var(--accent); background:#15251b; }
+  .dev .meta { min-width:0; }
+  .dev .alias { font-weight:600; }
+  .dev .addr { color:var(--dim); font-size:12px; font-family:ui-monospace, monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #drop { border:1.5px dashed #3a424c; border-radius:10px; padding:22px 12px; text-align:center; color:var(--dim); }
+  #drop.hot { border-color:var(--accent); color:var(--accent); background:#15251b; }
+  #drop b { color:#e6edf3; }
+  textarea { width:100%; min-height:64px; margin-top:12px; background:#0e1114; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px; font-family:ui-monospace, monospace; font-size:12px; resize:vertical; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:12px; flex-wrap:wrap; }
+  button { background:#242a31; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:#4a5560; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#08130c; font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  input[type=text] { background:#0e1114; color:#e6edf3; border:1px solid var(--line); border-radius:8px; padding:8px; width:110px; font:inherit; }
+  .chip { display:inline-block; padding:3px 8px; border:1px solid var(--line); border-radius:999px; font-size:12px; color:var(--dim); margin:0 6px 6px 0; font-family:ui-monospace, monospace; }
+  #status { margin-top:12px; min-height:20px; font-size:13px; }
+  #status.err { color:var(--warn); }
+  #status.ok { color:var(--accent); }
+  .muted { color:var(--dim); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <b id="alias">zapsend</b>
+  <span id="where">…</span>
+  <span id="pinbadge"></span>
+</header>
+
+<main>
+  <section>
+    <h2>Devices</h2>
+    <div id="devices"><div class="muted">scanning…</div></div>
+  </section>
+
+  <section>
+    <h2>Send</h2>
+    <div id="drop">Drop files here, or <b>click to pick</b><br><span class="muted">folders keep their tree when you type a path below</span></div>
+    <input type="file" id="picker" multiple hidden>
+    <div id="staged"></div>
+    <textarea id="paths" placeholder="…or absolute paths, one per line&#10;C:\Users\click\Pictures\holiday&#10;/home/me/notes.pdf"></textarea>
+    <div class="row">
+      <button class="primary" id="send">Send</button>
+      <button id="clear">Clear dropped files</button>
+      <label class="muted" style="display:flex;align-items:center;gap:6px">PIN
+        <input type="text" id="pin" placeholder="optional" inputmode="numeric" title="PIN the receiving device asks for">
+      </label>
+    </div>
+    <div id="status"></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let state = null;
+let selected = null;
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function say(msg, kind) {
+  const el = $('#status');
+  el.textContent = msg;
+  el.className = kind || '';
+}
+
+async function refresh() {
+  try {
+    state = await (await fetch('/ui/state')).json();
+  } catch (e) {
+    say('UI server is gone — is zapsend still running?', 'err');
+    return;
+  }
+  $('#alias').textContent = state.alias;
+  $('#where').textContent = `:${state.port} · saving to ${state.download_dir}`;
+  $('#pinbadge').textContent = state.pin_required ? 'PIN required' : '';
+
+  const list = $('#devices');
+  if (!state.devices.length) {
+    list.innerHTML = '<div class="muted">nothing yet — make sure LocalSend is open on the other device</div>';
+  } else {
+    if (!selected || !state.devices.some(d => d.fingerprint === selected)) selected = state.devices[0].fingerprint;
+    list.innerHTML = state.devices.map(d => `
+      <div class="dev ${d.fingerprint === selected ? 'sel' : ''}" data-fp="${esc(d.fingerprint)}">
+        <div class="meta">
+          <div class="alias">${esc(d.alias)}</div>
+          <div class="addr">${esc(d.address)}:${d.port} · ${esc(d.device_type)}</div>
+        </div>
+      </div>`).join('');
+    list.querySelectorAll('.dev').forEach(el => el.onclick = () => { selected = el.dataset.fp; refresh(); });
+  }
+
+  $('#staged').innerHTML = state.staged.length
+    ? state.staged.map(n => `<span class="chip">${esc(n)}</span>`).join('')
+    : '';
+}
+
+async function upload(files) {
+  for (const f of files) {
+    const r = await fetch(`/ui/stage?name=${encodeURIComponent(f.name)}`, { method: 'PUT', body: f });
+    if (!r.ok) { say(`could not stage ${f.name}: ${await r.text()}`, 'err'); return; }
+  }
+  say(`${files.length} file(s) ready`, 'ok');
+  refresh();
+}
+
+const drop = $('#drop');
+drop.onclick = () => $('#picker').click();
+$('#picker').onchange = e => upload(e.target.files);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('hot'); };
+drop.ondragleave = () => drop.classList.remove('hot');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('hot'); upload(e.dataTransfer.files); };
+
+$('#clear').onclick = async () => { await fetch('/ui/stage', { method: 'DELETE' }); refresh(); };
+
+$('#send').onclick = async () => {
+  const paths = $('#paths').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const staged = state ? state.staged : [];
+  if (!paths.length && !staged.length) return say('nothing to send yet', 'err');
+  if (!selected && !paths.length) return say('pick a device first', 'err');
+
+  const btn = $('#send');
+  btn.disabled = true;
+  say('sending…');
+  try {
+    const r = await fetch('/ui/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fingerprint: selected, paths, staged, pin: $('#pin').value || null }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) say(body.detail || body.message || JSON.stringify(body), 'err');
+    else say(`✓ ${body.files} file(s), ${(body.bytes/1048576).toFixed(1)} MiB → ${body.target}`, 'ok');
+  } catch (e) {
+    say(String(e), 'err');
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

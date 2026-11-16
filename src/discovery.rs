@@ -111,16 +111,18 @@ pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, me: DeviceInfo) {
 /// `POST /register` to every host on our own /24 and keep whoever answers.
 ///
 /// Returns how many peers were added to the registry.
-pub async fn sweep(registry: &Registry, me: &DeviceInfo) -> Result<usize> {
+pub async fn sweep(registry: &Registry, me: &DeviceInfo, quiet: bool) -> Result<usize> {
     let Some(local) = local_ipv4().await else {
         return Ok(0);
     };
     let hosts = subnet_hosts(local);
     let o = local.octets();
-    eprintln!(
-        "! no multicast answers — sweeping {}.{}.{}.0/24",
-        o[0], o[1], o[2]
-    );
+    if !quiet {
+        eprintln!(
+            "! no multicast answers — sweeping {}.{}.{}.0/24",
+            o[0], o[1], o[2]
+        );
+    }
 
     let http = reqwest::Client::builder()
         // Every device self-signs; identity is proven later by fingerprint

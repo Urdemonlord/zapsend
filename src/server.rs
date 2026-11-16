@@ -63,6 +63,10 @@ impl PinState {
         }
     }
 
+    pub fn is_required(&self) -> bool {
+        self.expected.is_some()
+    }
+
     /// `Ok` when the supplied PIN is right, or when no PIN is required.
     pub fn check(&self, supplied: Option<&str>) -> Result<(), (StatusCode, String)> {
         let Some(expected) = self.expected.as_deref() else {
