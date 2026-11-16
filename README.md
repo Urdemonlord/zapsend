@@ -211,7 +211,7 @@ over a LAN is an afternoon script.
 - [x] `--verbose` payload dumps for protocol debugging
 - [ ] `zapsend daemon` with a watch folder
 - [ ] Download API (reverse transfer: pull files *from* a peer)
-- [ ] mDNS fallback for networks that block multicast
+- [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)
 
 ## Known limitations
 
@@ -224,17 +224,19 @@ over a LAN is an afternoon script.
   `zapsend discover`) to close that hole. Discovery-based sends are always pinned.
 - Files are hashed (SHA-256) before upload, which costs an extra read pass.
 - No resume yet: a dropped connection means starting over.
-- **Interop with the real LocalSend app is not verified yet.** The wire format
-  follows the spec and has been tested zapsend↔zapsend, but until someone
-  round-trips against LocalSend on a phone, treat that path as untested.
+- **Interop is verified against LocalSend on Android only.** Both directions
+  round-trip (phone→PC receive, PC→phone send) and the two see each other in
+  discovery. iOS, macOS and the LocalSend desktop builds are untested; the wire
+  format follows the spec but nobody has run them.
 
 ## Troubleshooting
 
 **No devices found.** Most likely the network blocks multicast — common on
 guest wifi, corporate networks and some university APs. Use `--ip <address>`.
 
-**"API server on :53317 unavailable".** Another LocalSend or zapsend already
-holds the port. The operation continues; pass `--port` to run alongside it.
+**`:53317` is already in use.** Another LocalSend or zapsend holds it. `receive`
+stops with an error on purpose — a receiver that cannot listen is useless. Send
+and discover announce a free port instead and keep working.
 
 **Receiver rejects the transfer.** Some LocalSend configurations require
 accepting manually. Check the screen of the receiving device.
