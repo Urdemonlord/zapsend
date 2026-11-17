@@ -1,5 +1,6 @@
 mod cli;
 mod client;
+mod daemon;
 mod discovery;
 mod identity;
 mod protocol;
@@ -31,7 +32,7 @@ struct Stack {
 
 /// Identity only — no listeners. Used by `send --ip`, which does not need to
 /// be discoverable itself and therefore never fights another instance for a port.
-fn local_only(alias: &str, port: u16) -> Result<Stack> {
+pub(crate) fn local_only(alias: &str, port: u16) -> Result<Stack> {
     let (_, me) = identity::load_or_create(alias, port)?;
     let registry = discovery::new_registry();
     let state = Arc::new(server::AppState {
@@ -159,6 +160,34 @@ async fn main() -> Result<()> {
             scan,
         } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
         Command::Receive { dir, pin, ask } => receive(&alias, port, dir, pin, ask).await,
+        Command::Daemon {
+            dir,
+            to,
+            ip,
+            fingerprint,
+            pin,
+            interval,
+            settle,
+            keep,
+            scan,
+        } => {
+            daemon::run(
+                &alias,
+                port,
+                daemon::Options {
+                    dir,
+                    to,
+                    ip,
+                    fingerprint,
+                    pin,
+                    interval,
+                    settle,
+                    keep,
+                    scan,
+                },
+            )
+            .await
+        }
         Command::Ui {
             dir,
             pin,
@@ -169,7 +198,7 @@ async fn main() -> Result<()> {
 }
 
 /// Announce ourselves for `secs` seconds, then return everything we heard.
-async fn scan(stack: &Stack, secs: u64) -> Vec<Peer> {
+pub(crate) async fn scan(stack: &Stack, secs: u64) -> Vec<Peer> {
     let Some(sock) = stack.sock.as_ref() else {
         return Vec::new();
     };
@@ -452,7 +481,7 @@ async fn send(
     Ok(())
 }
 
-fn resolve_target(peers: &[Peer], target: Option<&str>) -> Result<Option<Peer>> {
+pub(crate) fn resolve_target(peers: &[Peer], target: Option<&str>) -> Result<Option<Peer>> {
     match target {
         Some(t) => {
             let needle = t.to_ascii_lowercase();

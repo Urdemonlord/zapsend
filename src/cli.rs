@@ -86,6 +86,47 @@ pub enum Command {
         ask: bool,
     },
 
+    /// Watch a folder and send whatever appears in it
+    Daemon {
+        /// Folder to watch
+        #[arg(long, default_value = "./zapsend-outbox")]
+        dir: PathBuf,
+
+        /// Target: alias or fingerprint prefix (from `zapsend discover`)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Skip discovery and connect straight to this address
+        /// (`192.168.1.42` or `192.168.1.42:53400`)
+        #[arg(long, conflicts_with = "to")]
+        ip: Option<String>,
+
+        /// Pin the peer's certificate fingerprint (64 hex chars)
+        #[arg(long)]
+        fingerprint: Option<String>,
+
+        /// PIN required by the receiving device, if it has one
+        #[arg(long)]
+        pin: Option<String>,
+
+        /// Seconds between folder scans
+        #[arg(long, default_value_t = 2)]
+        interval: u64,
+
+        /// Seconds a file must stay untouched before it is sent
+        /// (default: twice --interval, at least 3)
+        #[arg(long)]
+        settle: Option<u64>,
+
+        /// Leave delivered files in the folder instead of moving them to .sent
+        #[arg(long)]
+        keep: bool,
+
+        /// Discovery scan duration in seconds (ignored with --ip)
+        #[arg(long, default_value_t = 4)]
+        scan: u64,
+    },
+
     /// Browse devices and send from a local web page
     Ui {
         /// Where to save incoming files

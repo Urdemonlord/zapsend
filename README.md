@@ -135,6 +135,35 @@ never a path — so drop a folder as a path if you want its tree preserved.
 zapsend ui --ui-port 8080 --no-open    # different page port, don't launch a browser
 ```
 
+### Watch a folder and send automatically
+
+```sh
+zapsend daemon --dir ./outbox --to "Pixel"
+```
+
+Anything that lands in `./outbox` is sent to that device, then moved to
+`./outbox/.sent` so it is not sent twice. Folders are sent as a tree, same as
+`zapsend send`.
+
+```sh
+zapsend daemon --dir ~/Pictures --ip 192.168.1.42 --keep
+zapsend daemon --dir ./outbox --to "Pixel" --settle 10   # big slow copies
+```
+
+- **Polling, not inotify** — one directory read per `--interval` (default 2s).
+- **A file is only sent once it has stopped changing.** A tree has to sit
+  untouched for `--settle` seconds (default: twice `--interval`, at least 3), so
+  a copy in progress is never shipped half-finished.
+- **Delivery survives the other device being away.** If the send fails the file
+  stays put and is retried on the next tick; the error is printed once, not
+  every tick. The target is re-discovered each time, because addresses move.
+- **Ignored names:** dotfiles, `~$*` (Office locks), and `*.tmp`, `*.part`,
+  `*.partial`, `*.crdownload`, `*.download`, `*.swp`, `*.filepart`.
+- **`--keep`** leaves files in place instead of moving them, remembering what it
+  already delivered for as long as the daemon runs.
+- The daemon runs the normal API server so peers can see it, which means it can
+  also receive: anything pushed to it lands in `<dir>/.incoming`.
+
 ### Receive files
 
 ```sh
@@ -237,7 +266,7 @@ over a LAN is an afternoon script.
 - [x] Interactive accept prompt (`--ask`)
 - [x] `--verbose` payload dumps for protocol debugging
 - [x] Local web UI (`zapsend ui`)
-- [ ] `zapsend daemon` with a watch folder
+- [x] `zapsend daemon` with a watch folder
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)
 
