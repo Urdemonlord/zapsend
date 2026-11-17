@@ -117,6 +117,31 @@ recreated — the protocol has no way to express a directory without files.
 
 The receiver shows a normal LocalSend prompt — accept it there and the files land.
 
+### Resume a transfer that broke
+
+A dropped Wi-Fi connection used to mean starting a 4 GB video over. Now the
+receiver keeps what arrived and the sender asks where to continue:
+
+```sh
+zapsend send ./video.mp4 --to "Pixel"          # connection drops at 60%
+zapsend send ./video.mp4 --to "Pixel"          # continues from 60%
+```
+
+The partial file lives in `<download dir>/.zapsend-parts/` and is named after the
+file itself — name, size and SHA-256 — so it survives a receiver restart too.
+Before appending, the sender asks `GET /resume` for the stored offset *and* the
+SHA-256 of exactly those bytes; if the prefix is not the same file, the transfer
+starts over instead of splicing two different files together. A finished file is
+only moved into place once its full checksum matches what the sender announced.
+
+Notes:
+
+- this needs a zapsend receiver: it advertises `zapsendResume` in `info`, and
+  real LocalSend peers are sent the plain upload instead
+- `--retry N` (default 3) controls how many times a single file is retried
+  within one `send`; a dropped connection is retried automatically
+- `zapsend pull` does not resume yet — it restarts the file
+
 ### Browse and send from a browser
 
 ```sh
@@ -294,6 +319,7 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 | Identity | `GET /info` so a peer can be checked before a transfer starts |
 | Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
 | Download | `POST /prepare-download` for the share listing, then `GET /download` per file |
+| Resume | `GET /resume` for the stored offset + prefix checksum, then `POST /upload?offset=N` |
 | Ports | Multicast always `53317`; API port configurable via `--port` |
 
 Everything is streamed — a 40 GB file does not touch RAM. Incoming file names
@@ -341,7 +367,7 @@ own receiver by guessing wrong five times.
 - [x] Multiple files per transfer
 - [x] Fingerprint pinning on send
 - [x] Folder transfer
-- [ ] Resume interrupted transfers
+- [x] Resume interrupted transfers — `GET /resume` + `POST /upload?offset=N`
 - [x] PIN-protected receiving
 - [x] Interactive accept prompt (`--ask`)
 - [x] `--verbose` payload dumps for protocol debugging

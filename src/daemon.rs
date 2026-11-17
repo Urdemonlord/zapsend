@@ -276,7 +276,9 @@ async fn send_one(stack: &Stack, opts: &Options, peer: &Peer, path: &Path) -> Re
         .filter_map(|u| std::fs::metadata(&u.path).ok())
         .map(|m| m.len())
         .sum();
-    client::send_files(peer, &stack.me, &uploads, opts.pin.as_deref()).await?;
+    // The daemon re-queues anything that fails, so a couple of in-place
+    // attempts is enough; a long retry chain would stall the whole folder.
+    client::send_files(peer, &stack.me, &uploads, opts.pin.as_deref(), 2).await?;
     Ok((uploads.len(), bytes))
 }
 
@@ -292,6 +294,7 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
             let (addr, target_port) = crate::parse_target(raw)?;
             Peer {
                 info: crate::protocol::DeviceInfo {
+            zapsend_resume: false,
                     alias: raw.clone(),
                     version: crate::protocol::PROTOCOL_VERSION.to_string(),
                     device_model: None,

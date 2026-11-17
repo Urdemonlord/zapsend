@@ -67,6 +67,12 @@ pub enum Command {
         /// Discovery scan duration in seconds (ignored with --ip)
         #[arg(long, default_value_t = 4)]
         scan: u64,
+
+        /// How many times to retry a file whose connection drops. zapsend
+        /// receivers resume from the bytes they already have; other peers
+        /// restart the file.
+        #[arg(long, default_value_t = 3)]
+        retry: u32,
     },
 
     /// Accept incoming files and keep running

@@ -211,7 +211,7 @@ async fn send(
         .sum();
     let files = uploads.len();
 
-    client::send_files(&peer, &ui.app.me, &uploads, req.pin.as_deref())
+    client::send_files(&peer, &ui.app.me, &uploads, req.pin.as_deref(), 3)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
@@ -229,6 +229,7 @@ fn resolve_peer(ui: &UiState, req: &SendRequest) -> Result<Peer, Fail> {
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
         return Ok(Peer {
             info: crate::protocol::DeviceInfo {
+            zapsend_resume: false,
                 alias: raw.to_string(),
                 version: crate::protocol::PROTOCOL_VERSION.to_string(),
                 device_model: None,

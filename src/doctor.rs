@@ -202,6 +202,7 @@ async fn resolve(stack: &Stack, opts: &Options, target: &str) -> Result<Peer> {
         let (addr, port) = crate::parse_target(raw)?;
         return Ok(Peer {
             info: crate::protocol::DeviceInfo {
+            zapsend_resume: false,
                 alias: raw.clone(),
                 version: crate::protocol::PROTOCOL_VERSION.to_string(),
                 device_model: None,

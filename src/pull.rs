@@ -31,6 +31,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             let (addr, target_port) = parse_target(raw)?;
             Peer {
                 info: DeviceInfo {
+            zapsend_resume: false,
                     alias: raw.to_string(),
                     version: PROTOCOL_VERSION.to_string(),
                     device_model: None,

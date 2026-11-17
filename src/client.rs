@@ -6,7 +6,7 @@
 
 use crate::protocol::{
     DeviceInfo, FileMeta, Peer, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse,
-    API,
+    ResumeState, API,
 };
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
@@ -289,8 +289,9 @@ pub async fn send_files(
     me: &DeviceInfo,
     uploads: &[Upload],
     pin: Option<&str>,
+    retries: u32,
 ) -> Result<()> {
-    match send_files_over(peer, me, uploads, pin).await {
+    match send_files_over(peer, me, uploads, pin, retries).await {
         Err(e) if looks_like_scheme_mismatch(&e) => {
             let mut flipped = peer.clone();
             flipped.info.protocol = if peer.info.protocol.eq_ignore_ascii_case("http") {
@@ -302,72 +303,32 @@ pub async fn send_files(
                 "! {} did not answer over {} — retrying over {}",
                 peer.ip, peer.info.protocol, flipped.info.protocol
             );
-            send_files_over(&flipped, me, uploads, pin).await
+            send_files_over(&flipped, me, uploads, pin, retries).await
         }
         other => other,
     }
 }
 
-/// A plaintext peer answers our TLS ClientHello with garbage, which rustls
-/// reports as a corrupt record rather than a connect error.
-fn looks_like_scheme_mismatch(e: &anyhow::Error) -> bool {
-    let msg = format!("{e:#}").to_lowercase();
-    msg.contains("invalidcontenttype")
-        || msg.contains("corrupt message")
-        || msg.contains("handshake failure")
-        || msg.contains("received corrupt message")
+/// The receiver forgot our session (it restarted, or the session aged out).
+/// Retrying the same token is pointless; the caller prepares again.
+#[derive(Debug)]
+struct SessionGone;
+
+impl std::fmt::Display for SessionGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the receiver no longer knows this session")
+    }
 }
 
-async fn send_files_over(
-    peer: &Peer,
+impl std::error::Error for SessionGone {}
+
+async fn prepare_upload(
+    http: &reqwest::Client,
+    base: &str,
     me: &DeviceInfo,
-    uploads: &[Upload],
     pin: Option<&str>,
-) -> Result<()> {
-    if uploads.is_empty() {
-        bail!("no files to send");
-    }
-
-    let mut pending = Vec::new();
-    for (idx, upload) in uploads.iter().enumerate() {
-        let meta = std::fs::metadata(&upload.path)
-            .with_context(|| format!("cannot read {}", upload.path.display()))?;
-        pending.push(Pending {
-            id: idx.to_string(),
-            path: upload.path.clone(),
-            name: upload.name.clone(),
-            size: meta.len(),
-        });
-    }
-
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_message("hashing…");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let mut files = HashMap::new();
-    for item in &pending {
-        let path = item.path.clone();
-        let sha = tokio::task::spawn_blocking(move || sha256_file(&path)).await??;
-        files.insert(
-            item.id.clone(),
-            FileMeta {
-                id: item.id.clone(),
-                file_name: item.name.clone(),
-                size: item.size,
-                file_type: Some(mime_for(&item.name)),
-                sha256: Some(sha),
-            },
-        );
-    }
-    spinner.finish_and_clear();
-
-    let http = if peer.info.fingerprint.is_empty() {
-        unpinned_client()?
-    } else {
-        pinned_client(&peer.info.fingerprint)?
-    };
-
-    let base = peer.base_url();
+    files: HashMap<String, FileMeta>,
+) -> Result<PrepareUploadResponse> {
     let endpoint = match pin {
         Some(p) => format!("{base}{API}/prepare-upload?pin={p}"),
         None => format!("{base}{API}/prepare-upload"),
@@ -418,7 +379,175 @@ async fn send_files_over(
         }
     }
 
-    let prepared: PrepareUploadResponse = resp.json().await.context("bad prepare-upload body")?;
+    resp.json().await.context("bad prepare-upload body")
+}
+
+/// How many bytes of this file the receiver already has, or 0.
+///
+/// The offset alone is not enough: it must be the *same* file. The receiver
+/// sends the SHA-256 of its prefix and we compare it with ours, so a file that
+/// changed on disk restarts instead of being spliced into a corrupt whole.
+async fn stored_offset(http: &reqwest::Client, url: &str, item: &Pending) -> u64 {
+    let Ok(resp) = http.get(url).send().await else {
+        return 0;
+    };
+    if !resp.status().is_success() {
+        return 0;
+    }
+    let Ok(state) = resp.json::<ResumeState>().await else {
+        return 0;
+    };
+    if state.offset == 0 || state.offset > item.size {
+        return 0;
+    }
+
+    let path = item.path.clone();
+    let offset = state.offset;
+    let Ok(Ok(local)) = tokio::task::spawn_blocking(move || sha256_prefix(&path, offset)).await
+    else {
+        return 0;
+    };
+
+    if local.eq_ignore_ascii_case(&state.prefix_sha256) {
+        offset
+    } else {
+        eprintln!("! {} changed since the last attempt — starting over", item.name);
+        0
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_once(
+    http: &reqwest::Client,
+    base: &str,
+    prepared: &PrepareUploadResponse,
+    item: &Pending,
+    offset: u64,
+    pb: &Arc<ProgressBar>,
+    overall: &ProgressBar,
+    finished: u64,
+) -> Result<()> {
+    let token = prepared
+        .files
+        .get(&item.id)
+        .with_context(|| format!("receiver did not return a token for {}", item.name))?;
+
+    let url = format!(
+        "{base}{API}/upload?sessionId={}&fileId={}&token={}&offset={offset}",
+        prepared.session_id, item.id, token
+    );
+
+    let mut file = tokio::fs::File::open(&item.path).await?;
+    if offset > 0 {
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset)).await?;
+    }
+    pb.set_position(offset);
+    overall.set_position(finished + offset);
+
+    let bar = pb.clone();
+    let done = overall.clone();
+    let stream = ReaderStream::new(file).map(move |chunk| {
+        if let Ok(ref c) = chunk {
+            bar.inc(c.len() as u64);
+            done.inc(c.len() as u64);
+        }
+        chunk
+    });
+
+    let resp = http
+        .post(&url)
+        .body(reqwest::Body::wrap_stream(stream))
+        .send()
+        .await
+        .map_err(|e| anyhow::Error::new(e).context(format!("upload failed for {}", item.name)))?;
+    pb.finish_and_clear();
+
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if code == reqwest::StatusCode::FORBIDDEN {
+            return Err(anyhow::Error::new(SessionGone).context(body));
+        }
+        bail!("upload rejected for {} ({code}): {body}", item.name);
+    }
+    Ok(())
+}
+
+/// SHA-256 of the first `limit` bytes, so a resumed upload can prove it is
+/// appending to the same file the receiver kept.
+fn sha256_prefix(path: &Path, limit: u64) -> Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut left = limit;
+    while left > 0 {
+        let want = buf.len().min(left as usize);
+        let n = f.read(&mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn looks_like_scheme_mismatch(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}").to_lowercase();
+    msg.contains("invalidcontenttype")
+        || msg.contains("corrupt message")
+        || msg.contains("handshake failure")
+        || msg.contains("received corrupt message")
+}
+
+async fn send_files_over(
+    peer: &Peer,
+    me: &DeviceInfo,
+    uploads: &[Upload],
+    pin: Option<&str>,
+    retries: u32,
+) -> Result<()> {
+    if uploads.is_empty() {
+        bail!("no files to send");
+    }
+
+    let mut pending = Vec::new();
+    for (idx, upload) in uploads.iter().enumerate() {
+        let meta = std::fs::metadata(&upload.path)
+            .with_context(|| format!("cannot read {}", upload.path.display()))?;
+        pending.push(Pending {
+            id: idx.to_string(),
+            path: upload.path.clone(),
+            name: upload.name.clone(),
+            size: meta.len(),
+        });
+    }
+
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_message("hashing…");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let mut files = HashMap::new();
+    for item in &pending {
+        let path = item.path.clone();
+        let sha = tokio::task::spawn_blocking(move || sha256_file(&path)).await??;
+        files.insert(
+            item.id.clone(),
+            FileMeta {
+                id: item.id.clone(),
+                file_name: item.name.clone(),
+                size: item.size,
+                file_type: Some(mime_for(&item.name)),
+                sha256: Some(sha),
+            },
+        );
+    }
+    spinner.finish_and_clear();
+
+    let http = peer_client(peer)?;
+    let base = peer.base_url();
+    let mut prepared = prepare_upload(&http, &base, me, pin, files.clone()).await?;
 
     let total: u64 = pending.iter().map(|p| p.size).sum();
     let overall = ProgressBar::new(total);
@@ -429,48 +558,62 @@ async fn send_files_over(
     }
     overall.set_message(format!("{} file(s)", pending.len()));
 
+    // Only zapsend receivers advertise this. Real LocalSend peers get the plain
+    // upload, and a retry simply starts the file again.
+    let can_resume = peer.info.zapsend_resume;
+    let mut finished = 0u64;
+
     for item in &pending {
-        let token = prepared
-            .files
-            .get(&item.id)
-            .with_context(|| format!("receiver did not return a token for {}", item.name))?;
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
 
-        let url = format!(
-            "{base}{API}/upload?sessionId={}&fileId={}&token={}",
-            prepared.session_id, item.id, token
-        );
-
-        let file = tokio::fs::File::open(&item.path).await?;
-        let pb = Arc::new(ProgressBar::new(item.size));
-        if let Ok(style) =
-            ProgressStyle::with_template("{msg} [{bar:24}] {bytes}/{total_bytes} ({eta})")
-        {
-            pb.set_style(style.progress_chars("=> "));
-        }
-        pb.set_message(item.name.clone());
-
-        let bar = pb.clone();
-        let done = overall.clone();
-        let stream = ReaderStream::new(file).map(move |chunk| {
-            if let Ok(ref c) = chunk {
-                bar.inc(c.len() as u64);
-                done.inc(c.len() as u64);
+            // Ask what the receiver already has, on every attempt — that is also
+            // what makes a *new* `send` pick up bytes an earlier run left behind.
+            let offset = if can_resume {
+                let token = prepared.files.get(&item.id).map(|t| t.as_str()).unwrap_or("");
+                let url = format!(
+                    "{base}{API}/resume?sessionId={}&fileId={}&token={}",
+                    prepared.session_id, item.id, token
+                );
+                stored_offset(&http, &url, item).await
+            } else {
+                0
+            };
+            if offset > 0 {
+                eprintln!(
+                    "↻ {} — receiver already has {}, resuming",
+                    item.name,
+                    crate::human_bytes(offset)
+                );
             }
-            chunk
-        });
 
-        let resp = http
-            .post(&url)
-            .body(reqwest::Body::wrap_stream(stream))
-            .send()
-            .await
-            .with_context(|| format!("upload failed for {}", item.name))?;
-        pb.finish_and_clear();
+            let pb = Arc::new(ProgressBar::new(item.size));
+            if let Ok(style) =
+                ProgressStyle::with_template("{msg} [{bar:24}] {bytes}/{total_bytes} ({eta})")
+            {
+                pb.set_style(style.progress_chars("=> "));
+            }
+            pb.set_message(item.name.clone());
 
-        if !resp.status().is_success() {
-            let code = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            bail!("upload rejected for {} ({code}): {body}", item.name);
+            match upload_once(&http, &base, &prepared, item, offset, &pb, &overall, finished).await {
+                Ok(()) => {
+                    finished += item.size;
+                    break;
+                }
+                Err(e) => {
+                    if attempt > retries {
+                        bail!("{} failed after {attempt} attempt(s): {e:#}", item.name);
+                    }
+                    if e.downcast_ref::<SessionGone>().is_some() {
+                        eprintln!("! receiver restarted — preparing the transfer again");
+                        prepared = prepare_upload(&http, &base, me, pin, files.clone()).await?;
+                    } else {
+                        eprintln!("! {} interrupted: {e:#}", item.name);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                }
+            }
         }
     }
 

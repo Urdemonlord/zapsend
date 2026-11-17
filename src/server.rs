@@ -7,7 +7,8 @@
 
 use crate::discovery::Registry;
 use crate::protocol::{
-    DeviceInfo, FileMeta, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse, API,
+    DeviceInfo, FileMeta, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse,
+    ResumeState, API,
 };
 use axum::{
     body::{Body, Bytes},
@@ -20,6 +21,7 @@ use axum::{
 use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -166,6 +168,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(&format!("{API}/register"), post(register))
         .route(&format!("{API}/prepare-upload"), post(prepare_upload))
         .route(&format!("{API}/upload"), post(upload))
+        .route(&format!("{API}/resume"), get(resume))
         .route(&format!("{API}/prepare-download"), post(prepare_download))
         .route(&format!("{API}/download"), get(download))
         .with_state(state)
@@ -521,6 +524,96 @@ struct UploadQuery {
     session_id: String,
     file_id: String,
     token: String,
+    /// Byte offset this request continues from. Absent means "start over".
+    #[serde(default)]
+    offset: Option<u64>,
+}
+
+/// Everything the receiver already holds of one upload.
+///
+/// The name is derived from the file itself (name, size, checksum), not from the
+/// session: a receiver that was restarted mid-transfer must find the same bytes
+/// again, and the session id is long gone by then.
+fn part_key(meta: &FileMeta) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(meta.file_name.as_bytes());
+    hasher.update(meta.size.to_le_bytes());
+    hasher.update(meta.sha256.as_deref().unwrap_or("").as_bytes());
+    hex::encode(hasher.finalize())[..32].to_string()
+}
+
+/// Partial uploads live in a dot-directory inside the download dir: out of the
+/// way, and skipped by `walk_share` if someone shares that directory.
+fn part_dir(dir: &Path) -> PathBuf {
+    dir.join(".zapsend-parts")
+}
+
+fn part_path(dir: &Path, meta: &FileMeta) -> PathBuf {
+    part_dir(dir).join(format!("{}.part", part_key(meta)))
+}
+
+/// Bytes on disk plus the SHA-256 of exactly those bytes.
+fn stored_prefix(path: &Path) -> std::io::Result<(u64, String)> {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, String::new())),
+        Err(e) => return Err(e),
+    };
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut total = 0u64;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((total, hex::encode(hasher.finalize())))
+}
+
+/// Session + file + token in one check, shared by `upload` and `resume`.
+fn authorized(state: &AppState, q: &UploadQuery) -> Option<FileMeta> {
+    let sessions = state.sessions.lock().unwrap();
+    let (meta, token) = sessions.get(&q.session_id)?.files.get(&q.file_id)?;
+    if token != &q.token {
+        return None;
+    }
+    Some(meta.clone())
+}
+
+/// `GET /resume`: how far the previous attempt got.
+async fn resume(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UploadQuery>,
+) -> axum::response::Response {
+    let Some(meta) = authorized(&state, &q) else {
+        return (StatusCode::FORBIDDEN, "unknown session or file".to_string()).into_response();
+    };
+
+    let path = part_path(&state.download_dir, &meta);
+    match tokio::task::spawn_blocking(move || stored_prefix(&path)).await {
+        Ok(Ok((offset, prefix_sha256))) => (
+            StatusCode::OK,
+            Json(ResumeState {
+                offset,
+                prefix_sha256,
+            }),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot inspect the partial file: {e}"),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot inspect the partial file: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 async fn upload(
@@ -528,27 +621,123 @@ async fn upload(
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> impl IntoResponse {
-    let found = {
-        let sessions = state.sessions.lock().unwrap();
-        sessions
-            .get(&q.session_id)
-            .and_then(|s| s.files.get(&q.file_id))
-            .map(|(meta, token)| (meta.clone(), token.clone()))
-    };
-
-    let Some((meta, expected_token)) = found else {
+    let Some(meta) = authorized(&state, &q) else {
         return (StatusCode::FORBIDDEN, "unknown session or file".to_string());
     };
+    let offset = q.offset.unwrap_or(0);
 
-    if expected_token != q.token {
-        return (StatusCode::FORBIDDEN, "invalid token".to_string());
-    }
-
-    if let Err(e) = tokio::fs::create_dir_all(&state.download_dir).await {
+    let parts = part_dir(&state.download_dir);
+    if let Err(e) = tokio::fs::create_dir_all(&parts).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cannot create download dir: {e}"),
+            format!("cannot create the partial-upload dir: {e}"),
         );
+    }
+
+    let part = part_path(&state.download_dir, &meta);
+    let stored = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+    if offset > stored {
+        // The sender thinks we have more than we do. Refusing is the only safe
+        // answer: appending there would leave a hole in the file.
+        return (
+            StatusCode::CONFLICT,
+            format!("cannot resume at {offset}, only {stored} bytes are stored"),
+        );
+    }
+
+    let file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&part)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot open the partial file: {e}"),
+            )
+        }
+    };
+    // `set_len` both starts a fresh upload (offset 0) and drops bytes the sender
+    // is not claiming, so what is on disk always matches what was acknowledged.
+    if let Err(e) = file.set_len(offset).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot size the partial file: {e}"),
+        );
+    }
+
+    let pb = Arc::new(ProgressBar::new(meta.size));
+    if let Ok(style) = ProgressStyle::with_template("{msg} [{bar:30}] {bytes}/{total_bytes}") {
+        pb.set_style(style.progress_chars("=> "));
+    }
+    pb.set_message(meta.file_name.clone());
+    pb.set_position(offset);
+
+    let bar = pb.clone();
+    let stream = body.into_data_stream().map(move |chunk| {
+        if let Ok(ref c) = chunk {
+            bar.inc(c.len() as u64);
+        }
+        chunk
+    });
+
+    let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
+    let mut out = tokio::io::BufWriter::new(file);
+    let result = tokio::io::copy(&mut reader, &mut out).await;
+    pb.finish_and_clear();
+
+    if let Err(e) = result {
+        // Keep whatever arrived: that is the whole point of resuming.
+        let kept = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(offset);
+        eprintln!("! {e} while receiving {} — {kept} byte(s) kept for resume", meta.file_name);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("write failed: {e} (kept {kept} byte(s))"),
+        );
+    }
+    if let Err(e) = tokio::io::AsyncWriteExt::flush(&mut out).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("flush failed: {e}"),
+        );
+    }
+    drop(out);
+
+    let written = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
+    if written < meta.size {
+        // A short body is a dropped connection, not an error to throw away.
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "incomplete: {written} of {} bytes stored — resume at offset {written}",
+                meta.size
+            ),
+        );
+    }
+
+    if let Some(expected) = meta.sha256.clone() {
+        let probe = part.clone();
+        let hashed = tokio::task::spawn_blocking(move || stored_prefix(&probe)).await;
+        match hashed {
+            Ok(Ok((_, got))) if got.eq_ignore_ascii_case(&expected) => {}
+            Ok(Ok((_, got))) => {
+                let _ = tokio::fs::remove_file(&part).await;
+                eprintln!("✗ checksum mismatch for {} — discarded", meta.file_name);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("checksum mismatch: sender said {expected}, we computed {got}"),
+                );
+            }
+            _ => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot verify the received file".to_string(),
+                )
+            }
+        }
     }
 
     let path = unique_path(&state.download_dir, &meta.file_name);
@@ -560,49 +749,15 @@ async fn upload(
             );
         }
     }
-    let file = match tokio::fs::File::create(&path).await {
-        Ok(f) => f,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cannot create file: {e}"),
-            )
-        }
-    };
-
-    let pb = Arc::new(ProgressBar::new(meta.size));
-    if let Ok(style) = ProgressStyle::with_template("{msg} [{bar:30}] {bytes}/{total_bytes}") {
-        pb.set_style(style.progress_chars("=> "));
+    if let Err(e) = tokio::fs::rename(&part, &path).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot move the finished file into place: {e}"),
+        );
     }
-    pb.set_message(meta.file_name.clone());
 
-    let bar = pb.clone();
-    let stream = body.into_data_stream().map(move |chunk| {
-        if let Ok(ref c) = chunk {
-            bar.inc(c.len() as u64);
-        }
-        chunk
-    });
-
-    let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
-
-    let mut out = tokio::io::BufWriter::new(file);
-    let result = tokio::io::copy(&mut reader, &mut out).await;
-    pb.finish_and_clear();
-
-    match result {
-        Ok(_) => {
-            eprintln!("✓ saved {}", path.display());
-            (StatusCode::OK, String::new())
-        }
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&path).await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("write failed: {e}"),
-            )
-        }
-    }
+    eprintln!("✓ saved {}", path.display());
+    (StatusCode::OK, String::new())
 }
 
 /// Never silently clobber an existing file: `a.txt` -> `a (1).txt`, and keep
@@ -740,5 +895,33 @@ mod tests {
         assert_eq!(files.len(), 2);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn partial_upload_key_follows_the_file_identity() {
+        let a = FileMeta {
+            id: "0".to_string(),
+            file_name: "a.bin".to_string(),
+            size: 10,
+            file_type: None,
+            sha256: Some("aa".to_string()),
+        };
+        let mut other = a.clone();
+        other.sha256 = Some("bb".to_string());
+
+        assert_eq!(part_key(&a), part_key(&a.clone()));
+        assert_ne!(part_key(&a), part_key(&other));
+        let mut bigger = a.clone();
+        bigger.size = 11;
+        assert_ne!(part_key(&a), part_key(&bigger));
+    }
+
+    #[test]
+    fn stored_prefix_of_a_missing_partial_is_zero() {
+        let path = std::env::temp_dir().join("zapsend-definitely-not-here.part");
+        let _ = std::fs::remove_file(&path);
+        let (offset, hash) = stored_prefix(&path).unwrap();
+        assert_eq!(offset, 0);
+        assert!(hash.is_empty());
     }
 }

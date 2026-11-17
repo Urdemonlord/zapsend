@@ -58,6 +58,10 @@ pub struct DeviceInfo {
     /// http | https
     #[serde(default = "default_scheme")]
     pub protocol: String,
+    /// Non-standard: this receiver can resume a half-finished upload. Peers that
+    /// do not know the field ignore it, and we only resume when it is true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zapsend_resume: bool,
     #[serde(default)]
     pub download: bool,
 }
@@ -105,6 +109,16 @@ pub struct PrepareUploadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info: Option<DeviceInfo>,
     pub files: HashMap<String, FileMeta>,
+}
+
+/// What the receiver already holds of one upload, and the SHA-256 of exactly
+/// those bytes so the sender can prove its prefix is the same file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeState {
+    pub offset: u64,
+    #[serde(default)]
+    pub prefix_sha256: String,
 }
 
 /// Response to `POST /prepare-download`: our identity, a session id, and the

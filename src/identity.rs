@@ -56,6 +56,7 @@ pub fn load_or_create(alias: &str, port: u16) -> Result<(Identity, DeviceInfo)> 
     };
 
     let info = DeviceInfo {
+            zapsend_resume: false,
         alias: alias.to_string(),
         version: PROTOCOL_VERSION.to_string(),
         device_model: Some(format!(

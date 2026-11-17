@@ -112,6 +112,8 @@ pub(crate) async fn start(
     if share.is_some() {
         me.download = true;
     }
+    // This receiver can always resume a half-finished upload.
+    me.zapsend_resume = true;
 
     let state = Arc::new(server::AppState {
         me: me.clone(),
@@ -172,7 +174,21 @@ async fn main() -> Result<()> {
             fingerprint,
             pin,
             scan,
-        } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
+            retry,
+        } => {
+            send(
+                &alias,
+                port,
+                files,
+                to,
+                ip,
+                fingerprint,
+                pin,
+                scan,
+                retry,
+            )
+            .await
+        }
         Command::Receive {
             dir,
             pin,
@@ -448,6 +464,7 @@ async fn send(
     fingerprint: Option<String>,
     pin: Option<String>,
     scan_secs: u64,
+    retries: u32,
 ) -> Result<()> {
     // Straight-to-address sends need neither a server nor discovery, so they
     // work even while another instance owns the port.
@@ -455,8 +472,9 @@ async fn send(
         Some(raw) => {
             let (addr, target_port) = parse_target(&raw)?;
             let stack = local_only(alias, port)?;
-            let peer = Peer {
+            let mut peer = Peer {
                 info: DeviceInfo {
+                    zapsend_resume: false,
                     alias: raw.clone(),
                     version: PROTOCOL_VERSION.to_string(),
                     device_model: None,
@@ -468,6 +486,18 @@ async fn send(
                 },
                 ip: addr,
             };
+            // Ask who is actually there before sending: that is how we learn
+            // whether it can resume a broken upload, and which scheme it serves.
+            // A peer that does not answer /info is not a reason to give up.
+            if let Ok(info) = client::fetch_info(&peer).await {
+                peer.info.zapsend_resume = info.zapsend_resume;
+                peer.info.download = info.download;
+                peer.info.protocol = info.protocol;
+                peer.info.port = info.port;
+                if !info.alias.is_empty() {
+                    peer.info.alias = info.alias;
+                }
+            }
             (stack, peer)
         }
         None => {
@@ -527,7 +557,7 @@ async fn send(
         );
     }
 
-    client::send_files(&peer, &stack.me, &uploads, pin.as_deref()).await?;
+    client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await?;
     println!("✓ done");
     Ok(())
 }
