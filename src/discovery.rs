@@ -82,12 +82,14 @@ pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, me: DeviceInfo) {
             Err(_) => continue,
         };
 
-        let Ok(info) = serde_json::from_slice::<DeviceInfo>(&buf[..n]) else {
+        let Ok(announced) = serde_json::from_slice::<Announcement>(&buf[..n]) else {
             // A peer whose announcement we cannot parse is the single most
             // likely reason discovery silently finds nothing.
             crate::verbose::dump("←", "multicast (unparsed)", &buf[..n]);
             continue;
         };
+        let announce = announced.announce;
+        let info = announced.info;
 
         // Empty fingerprint means it is not a real peer. Our own echo carries
         // both our fingerprint *and* our alias: two instances on one machine
@@ -99,10 +101,26 @@ pub async fn listen(sock: Arc<UdpSocket>, registry: Registry, me: DeviceInfo) {
             continue;
         }
 
+        let peer = Peer {
+            info: info.clone(),
+            ip: src.ip(),
+        };
         registry
             .lock()
             .unwrap()
-            .insert(info.fingerprint.clone(), Peer { info, ip: src.ip() });
+            .insert(info.fingerprint.clone(), peer.clone());
+
+        // The spec says an `announce: true` datagram is answered with a
+        // register request. Without this the peer only finds us on our next
+        // announce (or its own subnet sweep), which is the usual reason a
+        // device shows up seconds late — or not at all.
+        if announce {
+            let me = me.clone();
+            tokio::spawn(async move {
+                // Best effort: a peer that does not answer costs nothing.
+                let _ = crate::client::register_back(&peer, &me).await;
+            });
+        }
     }
 }
 

@@ -156,13 +156,31 @@ pub(crate) async fn start(
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    // A failed run still has to be readable by a script: the verdict lives in
+    // the exit code, and `--json` puts the reason on stderr as one object so
+    // stdout stays a pure result channel.
+    if let Err(e) = run().await {
+        if json_mode() {
+            eprintln!(
+                "{}",
+                serde_json::json!({"ok": false, "error": format!("{e:#}")})
+            );
+        } else {
+            eprintln!("error: {e:#}");
+        }
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     // rustls 0.23 refuses to guess a crypto backend when more than one is
     // compiled in (axum-server and reqwest pull different defaults).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let cli = Cli::parse();
     verbose::set(cli.verbose);
+    JSON_MODE.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     let alias = cli.alias.clone();
     let port = cli.port;
 
@@ -212,6 +230,7 @@ async fn main() -> Result<()> {
             dir,
             file,
             scan,
+            retry,
         } => {
             pull::run(
                 &alias,
@@ -224,6 +243,7 @@ async fn main() -> Result<()> {
                     dir,
                     file,
                     scan,
+                    retry,
                 },
             )
             .await
@@ -327,8 +347,22 @@ fn print_peers(peers: &[Peer]) {
 
 /// Printed once on startup. Plain ASCII, so it survives every terminal and
 /// every code page Windows can throw at it.
+/// Output mode is a process-wide fact, not a parameter worth threading through
+/// every command: `--json` means "stdout is JSON, stderr is for humans".
+/// ponytail: a global, because the alternative is a flag on six functions and
+/// every call site, for something that cannot change mid-run.
+static JSON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn json_mode() -> bool {
+    JSON_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn banner() {
     use std::io::IsTerminal;
+
+    if json_mode() {
+        return;
+    }
 
     // Colour only when a human is looking; pipes and logs get plain text.
     let plain = !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some();
@@ -390,7 +424,26 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
     .await?;
     eprintln!("scanning for {wait}s…");
     let peers = scan(&stack, wait).await;
-    print_peers(&peers);
+    if json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "command": "discover",
+                "devices": peers.iter().map(|p| serde_json::json!({
+                    "alias": p.info.alias,
+                    "ip": p.ip.to_string(),
+                    "port": p.info.port,
+                    "protocol": p.info.protocol,
+                    "fingerprint": p.info.fingerprint,
+                    "deviceType": p.info.device_type,
+                    "download": p.info.download,
+                })).collect::<Vec<_>>(),
+            })
+        );
+    } else {
+        print_peers(&peers);
+    }
     Ok(())
 }
 
@@ -571,7 +624,26 @@ async fn send(
 
     let pin = hosts::resolve_pin(pin, to.as_deref());
     client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await?;
-    println!("✓ done");
+    if json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "command": "send",
+                "peer": {
+                    "alias": peer.info.alias,
+                    "ip": peer.ip.to_string(),
+                    "port": peer.info.port,
+                    "fingerprint": peer.info.fingerprint,
+                },
+                "files": uploads.iter().map(|u| u.name.clone()).collect::<Vec<_>>(),
+                "count": uploads.len(),
+                "bytes": bytes,
+            })
+        );
+    } else {
+        println!("✓ done");
+    }
     Ok(())
 }
 
@@ -635,18 +707,51 @@ async fn trust(
     };
 
     let path = hosts::remember(name, &addr.to_string(), port, Some(stored.clone()), pin)?;
-    println!(
-        "✓ {name} → {addr}:{port}, pinned to {}",
-        identity::short_fingerprint(&stored)
-    );
-    println!("  saved in {}", path.display());
-    println!("  now: zapsend send <file> --to {name}");
+    if json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "command": "trust",
+                "name": name,
+                "ip": addr.to_string(),
+                "port": port,
+                "fingerprint": stored,
+                "config": path.display().to_string(),
+            })
+        );
+    } else {
+        println!(
+            "✓ {name} → {addr}:{port}, pinned to {}",
+            identity::short_fingerprint(&stored)
+        );
+        println!("  saved in {}", path.display());
+        println!("  now: zapsend send <file> --to {name}");
+    }
     Ok(())
 }
 
 fn print_hosts() -> Result<()> {
     let map = hosts::load()?;
     let path = hosts::path()?;
+    if json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "command": "hosts",
+                "config": path.display().to_string(),
+                "hosts": map.iter().map(|(name, e)| serde_json::json!({
+                    "name": name,
+                    "ip": e.ip,
+                    "port": e.port,
+                    "fingerprint": e.fingerprint,
+                    "pinSet": e.pin.is_some(),
+                })).collect::<Vec<_>>(),
+            })
+        );
+        return Ok(());
+    }
     if map.is_empty() {
         println!("no remembered machines");
         println!("  add one: zapsend trust gpu-box --ip 100.64.0.7 --pin 4021");
@@ -675,7 +780,14 @@ fn print_hosts() -> Result<()> {
 
 fn forget(name: &str) -> Result<()> {
     if hosts::forget(name)? {
-        println!("✓ forgot {name}");
+        if json_mode() {
+            println!(
+                "{}",
+                serde_json::json!({"ok": true, "command": "forget", "name": name})
+            );
+        } else {
+            println!("✓ forgot {name}");
+        }
         Ok(())
     } else {
         bail!("no machine named \"{name}\" — see `zapsend hosts`")
@@ -783,6 +895,24 @@ async fn receive(
     )
     .await?;
 
+    if json_mode() {
+        // One line, then silence: a supervisor reads this and moves on.
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "command": "receive",
+                "alias": stack.me.alias,
+                "port": port,
+                "fingerprint": stack.me.fingerprint,
+                "dir": dir.display().to_string(),
+                "share": share.as_ref().map(|s| s.display().to_string()),
+                "download": stack.me.download,
+                "pinRequired": pin.is_some(),
+                "acceptsAutomatically": !ask,
+            })
+        );
+    } else {
     banner();
     println!("  listening   :{port}");
     println!("  alias       {}", stack.me.alias);
@@ -806,6 +936,7 @@ async fn receive(
     );
     println!();
     println!("  ctrl-c to stop");
+    }
 
     loop {
         if let Some(sock) = stack.sock.as_ref() {

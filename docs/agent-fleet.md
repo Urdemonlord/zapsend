@@ -157,6 +157,24 @@ zapsend doctor --to gpu-box
 Naming a machine also means a quiet multicast bus is no longer counted as a
 failure — on a VPN nothing is supposed to answer discovery.
 
+**From an agent's point of view:** every one-shot command takes `--json`, which
+puts one JSON object on stdout and leaves progress on stderr, so nothing has to
+be scraped out of human text.
+
+```sh
+zapsend pull --to gpu-box --dir ./results --json > result.json
+jq -r '.files[] | "\(.name) \(.size)"' result.json
+zapsend send ./dataset --to agent-b --json | jq -e '.ok'
+zapsend discover --json | jq -r '.devices[].alias'
+```
+
+The exit code is the verdict: `0` done, `1` not done (with
+`{"ok":false,"error":"…"}` on stderr under `--json`), `2` bad usage. A failed
+step is safe to retry, because both directions resume: `send` continues from the
+receiver's partial, `pull` continues from `<name>.part` and checks the prefix
+against the peer before appending a single byte. `--retry N` (default 3) keeps a
+flaky link from costing you a 40 GB checkpoint.
+
 ## Security, plainly
 
 - TLS protects the bytes in transit; `--fingerprint` is what proves the machine
@@ -170,8 +188,11 @@ failure — on a VPN nothing is supposed to answer discovery.
 
 ## Limits
 
-- `pull` does not resume yet — a broken pull restarts the file (`send` does resume).
-- No JSON output yet — use exit codes, or parse the human text.
+- `--json` covers the one-shot commands (`send`, `pull`, `discover`, `doctor`,
+  `hosts`, `trust`, `forget`) and prints a single startup object for `receive`.
+  It does not turn `receive` into a line-oriented event stream.
+- Resume needs a zapsend peer at the other end for the prefix check; pulling
+  from a plain LocalSend app restarts the file instead of splicing it.
 - Discovery does not cross subnets, by design of the protocol; that is what
   `trust` is for.
 - Files are never overwritten: a second `report.txt` becomes `report (1).txt`.

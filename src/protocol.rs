@@ -22,7 +22,7 @@ pub const MULTICAST_PORT: u16 = 53317;
 pub const MULTICAST_IP: [u8; 4] = [224, 0, 0, 167];
 
 /// Protocol version we advertise. LocalSend is lenient about this field.
-pub const PROTOCOL_VERSION: &str = "2.1";
+pub const PROTOCOL_VERSION: &str = "2.0";
 
 /// Base path for every HTTP endpoint.
 pub const API: &str = "/api/localsend/v2";
@@ -82,11 +82,51 @@ impl Peer {
 }
 
 /// Multicast payload. `announce: true` means "reply to me"; `false` is a reply.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Announcement {
     #[serde(flatten)]
     pub info: DeviceInfo,
+    #[serde(default)]
     pub announce: bool,
+}
+
+/// Write `fileType` even when we never learned it: the spec marks it required,
+/// and a missing key makes a strict client drop the whole file list.
+fn file_type_or_default<S: serde::Serializer>(
+    value: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(t) => serializer.serialize_str(t),
+        None => serializer.serialize_str("application/octet-stream"),
+    }
+}
+
+/// Enough of a MIME guess for a peer's file-type icon; the spec has no opinion.
+pub fn guess_mime(name: &str) -> String {
+    let ext = name
+        .rsplit_once('.')
+        .map(|(_, e)| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mime = match ext.as_str() {
+        "txt" | "log" | "md" | "csv" => "text/plain",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "zip" => "application/zip",
+        "gz" | "tgz" => "application/gzip",
+        "tar" => "application/x-tar",
+        _ => "application/octet-stream",
+    };
+    mime.to_string()
 }
 
 /// Metadata for one file inside a transfer.
@@ -96,7 +136,9 @@ pub struct FileMeta {
     pub id: String,
     pub file_name: String,
     pub size: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // The spec lists `fileType` on every file object and the official client
+    // parses it as a required string, so it is always written — never omitted.
+    #[serde(default, serialize_with = "file_type_or_default")]
     pub file_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
@@ -138,4 +180,33 @@ pub struct PrepareDownloadResponse {
 pub struct PrepareUploadResponse {
     pub session_id: String,
     pub files: HashMap<String, String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_type_is_never_omitted_from_the_json() {
+        let meta = FileMeta {
+            id: "a".into(),
+            file_name: "a.txt".into(),
+            size: 1,
+            file_type: None,
+            sha256: None,
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            json.contains("\"fileType\":\"application/octet-stream\""),
+            "a strict client drops the whole file list without fileType: {json}"
+        );
+    }
+
+    #[test]
+    fn guess_mime_knows_the_common_ones() {
+        assert_eq!(guess_mime("x.png"), "image/png");
+        assert_eq!(guess_mime("X.JPG"), "image/jpeg");
+        assert_eq!(guess_mime("notes.md"), "text/plain");
+        assert_eq!(guess_mime("no-extension"), "application/octet-stream");
+    }
 }

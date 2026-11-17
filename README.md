@@ -183,7 +183,38 @@ Notes:
   real LocalSend peers are sent the plain upload instead
 - `--retry N` (default 3) controls how many times a single file is retried
   within one `send`; a dropped connection is retried automatically
-- `zapsend pull` does not resume yet — it restarts the file
+
+Pulling resumes too. The receiver honours `Range: bytes=N-`, so `zapsend pull`
+keeps what it already has in `<name>.part` and asks for the rest:
+
+```sh
+zapsend pull --to server --dir ./checkpoints      # dies at 60%
+zapsend pull --to server --dir ./checkpoints      # continues from 60%
+```
+
+Before appending, the client asks `GET /verify-download?offset=N` for the
+SHA-256 of the first N bytes of the file the peer is sharing, and compares it
+with its own partial. A mismatch — a different file, a file that changed, a
+truncated write — throws the partial away and starts over instead of gluing two
+files together. If the receiver restarted and forgot the download session, the
+client asks for a new one and keeps the bytes it already has. A plain LocalSend
+peer has no such route, so a resumed pull from one of those simply starts over.
+
+### Script it: `--json` and exit codes
+
+Every one-shot command takes `--json`: stdout becomes exactly one JSON object,
+human progress stays on stderr, and the verdict stays in the exit code.
+
+```sh
+zapsend pull --to server --dir ./in --json | jq -r '.files[].name'
+zapsend discover --json | jq -r '.devices[] | "\(.alias)\t\(.ip)"'
+zapsend send ./report.csv --to server --json | jq -e '.ok'
+```
+
+Exit codes: `0` the thing you asked for happened, `1` it did not (the reason is
+on stderr, as `{"ok":false,"error":"…"}` under `--json`), `2` the command line
+itself was wrong. Nothing else is printed on stdout, so a script never has to
+strip a banner or a progress bar.
 
 ### Browse and send from a browser
 
@@ -357,12 +388,13 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 
 | Piece | What zapsend does |
 |---|---|
-| Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake; `/24` unicast sweep when multicast is blocked |
+| Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake; an `announce: true` datagram is answered with a register request; `/24` unicast sweep when multicast is blocked |
 | Identity | Self-signed cert; the sender pins the peer's SHA-256 fingerprint |
 | Identity | `GET /info` so a peer can be checked before a transfer starts |
-| Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
-| Download | `POST /prepare-download` for the share listing, then `GET /download` per file |
-| Resume | `GET /resume` for the stored offset + prefix checksum, then `POST /upload?offset=N` |
+| Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed; the session is bound to the sender's address and a token is spent once its file lands |
+| Download | `POST /prepare-download` for the share listing, then `GET /download` per file, honouring `Range: bytes=N-` |
+| Resume | `GET /resume` for the stored offset + prefix checksum, then `POST /upload?offset=N`; `GET /verify-download` does the same for pulls |
+| Cancel | `POST /cancel?sessionId=…` drops the session, as the spec asks |
 | Ports | Multicast always `53317`; API port configurable via `--port` |
 
 Everything is streamed — a 40 GB file does not touch RAM. Incoming file names

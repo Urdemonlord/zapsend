@@ -13,6 +13,20 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// `--json` means stdout is one object; the human report moves to stderr so it
+/// still lands in the log instead of being thrown away.
+macro_rules! say {
+    ($($t:tt)*) => {
+        if crate::json_mode() {
+            eprintln!($($t)*)
+        } else {
+            println!($($t)*)
+        }
+    };
+}
+
+
+
 pub struct Options {
     /// Device to test reachability against (alias, fingerprint prefix, or IP).
     pub to: Option<String>,
@@ -27,8 +41,8 @@ pub struct Options {
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     let mut problems: Vec<String> = Vec::new();
 
-    println!("zapsend doctor");
-    println!();
+    say!("zapsend doctor");
+    say!();
 
     // Probe the port *before* starting anything: the stack below binds it, and a
     // probe afterwards reports our own listener as a stranger's.
@@ -47,20 +61,20 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     )
     .await?;
 
-    println!("  version     {}", env!("CARGO_PKG_VERSION"));
-    println!(
+    say!("  version     {}", env!("CARGO_PKG_VERSION"));
+    say!(
         "  device      \"{}\" ({})",
         stack.me.alias,
         stack.me.device_type.as_deref().unwrap_or("headless")
     );
-    println!(
+    say!(
         "  fingerprint {}",
         crate::identity::short_fingerprint(&stack.me.fingerprint)
     );
     if stack.me.port == port {
-        println!("  api port    {port}");
+        say!("  api port    {port}");
     } else {
-        println!("  api port    {} (fell back from {port})", stack.me.port);
+        say!("  api port    {} (fell back from {port})", stack.me.port);
     }
 
     // Naming a device means discovery is not the thing being tested: a quiet
@@ -73,22 +87,22 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     let addrs = local_addrs().await;
     if addrs.is_empty() {
         problems.push("no IPv4 address on any interface".into());
-        println!("  ✗ address   none — is the machine connected to a network?");
+        say!("  ✗ address   none — is the machine connected to a network?");
     } else {
-        println!("  ✓ address   {}", addrs.join(", "));
+        say!("  ✓ address   {}", addrs.join(", "));
         if addrs.iter().any(|a| a.starts_with("10.42.")) {
-            println!("    ! 10.42.x.x looks like Docker — peers cannot reach that from the LAN");
+            say!("    ! 10.42.x.x looks like Docker — peers cannot reach that from the LAN");
         }
     }
 
     // 2. Was the port free when we looked?
     match port_taken {
-        None => println!("  ✓ port      :{port} is free"),
+        None => say!("  ✓ port      :{port} is free"),
         Some(e) => {
             problems.push(format!("port :{port} is already in use"));
-            println!("  ✗ port      :{port} is taken ({e})");
-            println!("              `receive` refuses to start; `send`/`discover` fall back to a random port");
-            println!("              on Windows: Get-Process zapsend | Stop-Process -Force");
+            say!("  ✗ port      :{port} is taken ({e})");
+            say!("              `receive` refuses to start; `send`/`discover` fall back to a random port");
+            say!("              on Windows: Get-Process zapsend | Stop-Process -Force");
         }
     }
 
@@ -99,17 +113,17 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             match std::fs::write(&probe, b"ok") {
                 Ok(()) => {
                     let _ = std::fs::remove_file(&probe);
-                    println!("  ✓ download  {} (writable)", opts.dir.display());
+                    say!("  ✓ download  {} (writable)", opts.dir.display());
                 }
                 Err(e) => {
                     problems.push(format!("cannot write to {}", opts.dir.display()));
-                    println!("  ✗ download  {} is not writable: {e}", opts.dir.display());
+                    say!("  ✗ download  {} is not writable: {e}", opts.dir.display());
                 }
             }
         }
         Err(e) => {
             problems.push(format!("cannot create {}", opts.dir.display()));
-            println!("  ✗ download  cannot create {}: {e}", opts.dir.display());
+            say!("  ✗ download  cannot create {}: {e}", opts.dir.display());
         }
     }
 
@@ -124,16 +138,16 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         if !named {
             problems.push("no device answered discovery".into());
         }
-        println!(
+        say!(
             "  ! multicast no answers in {}s",
             started.elapsed().as_secs()
         );
-        println!("              common causes: firewall, VPN, Hyper-V/WSL adapter,");
-        println!("              phone hotspot isolating clients, or the peer is not running");
+        say!("              common causes: firewall, VPN, Hyper-V/WSL adapter,");
+        say!("              phone hotspot isolating clients, or the peer is not running");
     } else {
-        println!("  ✓ multicast {} device(s) answered", peers.len());
+        say!("  ✓ multicast {} device(s) answered", peers.len());
         for p in &peers {
-            println!(
+            say!(
                 "              \"{}\" {} {}:{}",
                 p.info.alias, p.info.protocol, p.ip, p.info.port
             );
@@ -145,22 +159,22 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     if peers.is_empty() {
         match discovery::sweep(&stack.registry, &stack.me, true).await {
             Ok(n) if n > 0 => {
-                println!("  ✓ sweep     {n} device(s) answered unicast on this /24");
+                say!("  ✓ sweep     {n} device(s) answered unicast on this /24");
                 for p in snapshot(&stack) {
-                    println!("              \"{}\" {}:{}", p.info.alias, p.ip, p.info.port);
+                    say!("              \"{}\" {}:{}", p.info.alias, p.ip, p.info.port);
                 }
             }
             Ok(_) => {
                 if !named {
                     problems.push("no device answered discovery".into());
                 }
-                println!("  ! sweep     nothing on this /24 either");
+                say!("  ! sweep     nothing on this /24 either");
             }
             Err(e) => {
                 if !named {
                     problems.push("the /24 sweep failed".into());
                 }
-                println!("  ! sweep     failed: {e}");
+                say!("  ! sweep     failed: {e}");
             }
         }
     }
@@ -170,33 +184,44 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         let peer = resolve(&stack, &opts, target).await?;
         match client::fetch_info(&peer).await {
             Ok(info) => {
-                println!(
+                say!(
                     "  ✓ peer      \"{}\" {}:{} over {} (LocalSend {})",
                     info.alias, peer.ip, info.port, info.protocol, info.version
                 );
                 if info.fingerprint.eq_ignore_ascii_case(&peer.info.fingerprint) {
-                    println!("              fingerprint matches what discovery announced");
+                    say!("              fingerprint matches what discovery announced");
                 } else if !peer.info.fingerprint.is_empty() {
-                    println!("              ! fingerprint differs from the announcement — pass --ip to skip discovery");
+                    say!("              ! fingerprint differs from the announcement — pass --ip to skip discovery");
                 }
                 if info.download {
-                    println!("              peer offers a download API");
+                    say!("              peer offers a download API");
                 }
             }
             Err(e) => {
                 problems.push(format!("cannot reach \"{target}\""));
-                println!("  ✗ peer      {e}");
+                say!("  ✗ peer      {e}");
             }
         }
     }
 
-    println!();
+    say!();
+    if crate::json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": problems.is_empty(),
+                "command": "doctor",
+                "problems": problems,
+            })
+        );
+    }
+
     if problems.is_empty() {
-        println!("  no problems found");
+        say!("  no problems found");
         Ok(())
     } else {
         for p in &problems {
-            println!("  problem: {p}");
+            say!("  problem: {p}");
         }
         bail!("{} problem(s) found", problems.len())
     }
@@ -249,6 +274,7 @@ async fn resolve(stack: &Stack, opts: &Options, target: &str) -> Result<Peer> {
 }
 
 /// The address the routing table would use for a LAN destination — the one a
+
 /// peer on the same network can actually reach. Loopback does not count.
 async fn local_addrs() -> Vec<String> {
     match discovery::local_ipv4().await {

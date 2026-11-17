@@ -21,6 +21,8 @@ pub struct Options {
     pub dir: PathBuf,
     /// Only pull files whose path or name contains one of these.
     pub file: Vec<String>,
+    /// How many times to retry a broken download, resuming from the partial.
+    pub retry: u32,
     /// Discovery scan duration in seconds (ignored with --ip).
     pub scan: u64,
 }
@@ -133,18 +135,87 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
 
     let mut total = 0u64;
     let mut failed = 0usize;
+    let mut session_id = session_id;
+    let mut report: Vec<serde_json::Value> = Vec::new();
     for file in &wanted {
         let dest = unique_dest(&opts.dir, &file.file_name);
-        match client::download_file(&peer, &session_id, file, &dest).await {
-            Ok(bytes) => {
-                total += bytes;
-                println!("✓ {} ({})", file.file_name, human_bytes(bytes));
+        let mut last_error = None;
+        let mut finished = None;
+        for attempt in 0..=opts.retry {
+            if attempt > 0 {
+                eprintln!(
+                    "  retry {attempt}/{} for {}",
+                    opts.retry, file.file_name
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            Err(e) => {
-                failed += 1;
-                eprintln!("✗ {}: {e}", file.file_name);
+            match client::download_file(&peer, &session_id, file, &dest).await {
+                Ok(bytes) => {
+                    finished = Some(bytes);
+                    break;
+                }
+                Err(e) => {
+                    // The peer keeps download sessions in memory, so a restarted
+                    // receiver answers 403. Ask for a fresh one and resume: the
+                    // bytes on disk are still good.
+                    if e.to_string().contains("403") {
+                        if let Ok((fresh, _)) =
+                            client::prepare_download(&peer, pin.as_deref()).await
+                        {
+                            eprintln!("  download session expired, asked for a new one");
+                            session_id = fresh;
+                        }
+                    }
+                    last_error = Some(e);
+                }
             }
         }
+
+        match (finished, last_error) {
+            (Some(bytes), _) => {
+                total += bytes;
+                report.push(serde_json::json!({
+                    "name": file.file_name,
+                    "size": bytes,
+                    "path": dest.display().to_string(),
+                    "ok": true,
+                }));
+                if !crate::json_mode() {
+                    println!("✓ {} ({})", file.file_name, human_bytes(bytes));
+                }
+            }
+            (None, Some(e)) => {
+                failed += 1;
+                report.push(serde_json::json!({
+                    "name": file.file_name,
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+                eprintln!("✗ {}: {e}", file.file_name);
+            }
+            (None, None) => unreachable!("a download either finishes or fails"),
+        }
+    }
+
+    if crate::json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": failed == 0,
+                "command": "pull",
+                "peer": {
+                    "alias": info.alias,
+                    "ip": peer.ip.to_string(),
+                    "port": peer.info.port,
+                    "fingerprint": peer.info.fingerprint,
+                },
+                "dir": opts.dir.display().to_string(),
+                "files": report,
+                "count": wanted.len(),
+                "failed": failed,
+                "bytes": total,
+            })
+        );
     }
 
     if failed > 0 {

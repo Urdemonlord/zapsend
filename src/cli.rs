@@ -25,6 +25,11 @@ pub struct Cli {
     #[arg(long, short = 'v', global = true)]
     pub verbose: bool,
 
+    /// Machine-readable output: one JSON object on stdout, human progress on
+    /// stderr. Exit code still carries the verdict.
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -158,6 +163,10 @@ pub enum Command {
         /// Discovery scan duration in seconds (ignored with --ip)
         #[arg(long, default_value_t = 4)]
         scan: u64,
+
+        /// Retry a broken download this many times, continuing where it stopped
+        #[arg(long, default_value_t = 3)]
+        retry: u32,
     },
 
     /// Check why discovery or sending is not working

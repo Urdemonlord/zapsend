@@ -12,8 +12,8 @@ use crate::protocol::{
 };
 use axum::{
     body::{Body, Bytes},
-    extract::{ConnectInfo, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    extract::{ConnectInfo, DefaultBodyLimit, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -24,6 +24,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::io::SeekFrom;
+use tokio::io::AsyncSeekExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +34,9 @@ use tokio_util::io::{ReaderStream, StreamReader};
 pub struct Session {
     /// file id -> (metadata, token)
     pub files: HashMap<String, (FileMeta, String)>,
+    /// Who opened it. The spec's 403 is "invalid token or IP address", and a
+    /// session id is not a secret — it travels in URLs.
+    pub ip: std::net::IpAddr,
 }
 
 pub struct AppState {
@@ -166,11 +171,18 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(&format!("{API}/info"), get(info))
         .route(&format!("{API}/register"), post(register))
-        .route(&format!("{API}/prepare-upload"), post(prepare_upload))
+        // A sender may attach base64 previews for a whole batch; the default
+        // 2 MB extractor limit rejects those before we ever see the JSON.
+        .route(
+            &format!("{API}/prepare-upload"),
+            post(prepare_upload).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(&format!("{API}/cancel"), post(cancel))
         .route(&format!("{API}/upload"), post(upload))
         .route(&format!("{API}/resume"), get(resume))
         .route(&format!("{API}/prepare-download"), post(prepare_download))
         .route(&format!("{API}/download"), get(download))
+        .route(&format!("{API}/verify-download"), get(verify_download))
         .with_state(state)
 }
 
@@ -266,8 +278,10 @@ async fn prepare_download(
     Query(q): Query<DownloadListQuery>,
 ) -> axum::response::Response {
     let Some(root) = state.share.clone() else {
+        // Not a 404: the route exists, we are simply not sharing. The spec's
+        // table for this route has 403, not 404.
         return (
-            StatusCode::NOT_FOUND,
+            StatusCode::FORBIDDEN,
             "download api is off — start the receiver with --share DIR".to_string(),
         )
             .into_response();
@@ -324,15 +338,120 @@ async fn prepare_download(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CancelQuery {
+    session_id: Option<String>,
+}
+
+/// `POST /cancel`: the sender gave up. Dropping the session is enough — partial
+/// uploads stay on disk, so a later attempt can still resume them.
+async fn cancel(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CancelQuery>,
+) -> StatusCode {
+    if let Some(id) = q.session_id {
+        state.sessions.lock().unwrap().remove(&id);
+        eprintln!("✗ peer cancelled session {id}");
+    }
+    StatusCode::OK
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct DownloadFileQuery {
     session_id: String,
     file_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifyQuery {
+    session_id: String,
+    file_id: String,
+    offset: u64,
+}
+
+/// `GET /verify-download`: the SHA-256 of the first `offset` bytes of a shared
+/// file.
+///
+/// A resumed pull must not splice the bytes it already has with the rest of a
+/// different file, and the Download API carries no checksum, so the client asks
+/// the server to describe the prefix it is about to continue from. Hashing the
+/// prefix costs a local read; trusting it blindly costs the file.
+async fn verify_download(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VerifyQuery>,
+) -> axum::response::Response {
+    let Some(root) = state.share.clone() else {
+        return (StatusCode::NOT_FOUND, "download api is off".to_string()).into_response();
+    };
+    let known = {
+        let mut live = state.downloads.lock().unwrap();
+        live.retain(|_, seen| seen.elapsed() < DOWNLOAD_SESSION_TTL);
+        live.contains_key(&q.session_id)
+    };
+    if !known {
+        return (
+            StatusCode::FORBIDDEN,
+            "unknown or expired session — call prepare-download first".to_string(),
+        )
+            .into_response();
+    }
+    let Some(path) = share_path(&root, &q.file_id) else {
+        return (StatusCode::NOT_FOUND, "no such file in the share".to_string()).into_response();
+    };
+
+    // Hashing can take a while on a big file, and this is an async handler.
+    let probe = path.clone();
+    let limit = q.offset;
+    match tokio::task::spawn_blocking(move || prefix_sha256(&probe, limit)).await {
+        Ok(Ok(Some(prefix_sha256))) => Json(ResumeState {
+            offset: q.offset,
+            prefix_sha256,
+        })
+        .into_response(),
+        Ok(Ok(None)) => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("the file is shorter than {} bytes", q.offset),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read the file: {e}"),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the prefix check died: {e}"),
+        )
+            .into_response(),
+    }
+}
+
+/// SHA-256 of the first `limit` bytes, or `None` when the file is shorter than
+/// that. `stored_prefix` hashes everything; this one stops early.
+fn prefix_sha256(path: &Path, limit: u64) -> std::io::Result<Option<String>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    let mut left = limit;
+    while left > 0 {
+        let want = std::cmp::min(left, buf.len() as u64) as usize;
+        let n = file.read(&mut buf[..want])?;
+        if n == 0 {
+            return Ok(None);
+        }
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(Some(hex::encode(hasher.finalize())))
 }
 
 /// `GET /download`: stream one file from the share.
 async fn download(
     State(state): State<Arc<AppState>>,
     Query(q): Query<DownloadFileQuery>,
+    headers: HeaderMap,
 ) -> axum::response::Response {
     let Some(root) = state.share.clone() else {
         return (StatusCode::NOT_FOUND, "download api is off".to_string()).into_response();
@@ -355,7 +474,7 @@ async fn download(
         return (StatusCode::NOT_FOUND, "no such file in the share".to_string()).into_response();
     };
 
-    let file = match tokio::fs::File::open(&path).await {
+    let mut file = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
         Err(e) => {
             return (
@@ -367,18 +486,76 @@ async fn download(
     };
     let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
 
-    eprintln!("→ sending {}", path.display());
+    // A pull that died halfway should continue where it stopped, so honour a
+    // plain `bytes=N-` range. Anything fancier (multiple ranges, suffixes) is
+    // answered with the whole file, which every client understands.
+    let start = match headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_range_start)
+    {
+        Some(start) if start < size => start,
+        Some(_) => {
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                format!("range starts at or past the end of a {size} byte file"),
+            )
+                .into_response()
+        }
+        None => 0,
+    };
+    if start > 0 {
+        if let Err(e) = file.seek(SeekFrom::Start(start)).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot seek: {e}"),
+            )
+                .into_response();
+        }
+    }
 
-    let mut resp = Body::from_stream(ReaderStream::new(file)).into_response();
+    eprintln!(
+        "→ sending {}{}",
+        path.display(),
+        if start > 0 {
+            format!(" from byte {start}")
+        } else {
+            String::new()
+        }
+    );
+
+    let body = Body::from_stream(ReaderStream::new(file));
+    let mut resp = if start > 0 {
+        (StatusCode::PARTIAL_CONTENT, body).into_response()
+    } else {
+        body.into_response()
+    };
     let headers = resp.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    if let Ok(len) = HeaderValue::from_str(&size.to_string()) {
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(len) = HeaderValue::from_str(&(size - start).to_string()) {
         headers.insert(header::CONTENT_LENGTH, len);
     }
+    if start > 0 {
+        if let Ok(range) = HeaderValue::from_str(&format!("bytes {start}-{}/{size}", size - 1)) {
+            headers.insert(header::CONTENT_RANGE, range);
+        }
+    }
     resp
+}
+
+/// `bytes=N-` → N. Other range forms return None, which means "send the whole
+/// file": a wrong guess about offsets is worse than a slower restart.
+fn parse_range_start(raw: &str) -> Option<u64> {
+    let rest = raw.trim().strip_prefix("bytes=")?;
+    let (from, to) = rest.split_once('-')?;
+    if !to.trim().is_empty() {
+        return None;
+    }
+    from.trim().parse::<u64>().ok()
 }
 
 /// Every file under the share root, keyed by its path relative to that root.
@@ -420,9 +597,9 @@ fn walk_share(root: &Path) -> std::io::Result<HashMap<String, FileMeta>> {
                 rel.clone(),
                 FileMeta {
                     id: rel,
+                    file_type: Some(crate::protocol::guess_mime(&name)),
                     file_name: name,
                     size: meta.len(),
-                    file_type: None,
                     sha256: None,
                 },
             );
@@ -477,6 +654,12 @@ async fn prepare_upload(
         return (code, msg).into_response();
     }
 
+    // An empty list would otherwise mint a session with no files and leave the
+    // sender waiting for a token that does not exist.
+    if req.files.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no files provided".to_string()).into_response();
+    }
+
     let from = req
         .info
         .as_ref()
@@ -504,7 +687,7 @@ async fn prepare_upload(
         .sessions
         .lock()
         .unwrap()
-        .insert(session_id.clone(), Session { files });
+        .insert(session_id.clone(), Session { files, ip: addr.ip() });
 
     eprintln!("→ incoming: {} file(s) from \"{}\"", count, from);
 
@@ -575,21 +758,35 @@ fn stored_prefix(path: &Path) -> std::io::Result<(u64, String)> {
 }
 
 /// Session + file + token in one check, shared by `upload` and `resume`.
-fn authorized(state: &AppState, q: &UploadQuery) -> Option<FileMeta> {
+fn authorized(state: &AppState, q: &UploadQuery, from: std::net::IpAddr) -> Option<FileMeta> {
     let sessions = state.sessions.lock().unwrap();
-    let (meta, token) = sessions.get(&q.session_id)?.files.get(&q.file_id)?;
+    let session = sessions.get(&q.session_id)?;
+    if session.ip != from {
+        return None;
+    }
+    let (meta, token) = session.files.get(&q.file_id)?;
     if token != &q.token {
         return None;
     }
     Some(meta.clone())
 }
 
+/// A finished file's token stops working, so replaying an upload cannot write a
+/// second copy under a new name.
+fn consume(state: &AppState, q: &UploadQuery) {
+    let mut sessions = state.sessions.lock().unwrap();
+    if let Some(session) = sessions.get_mut(&q.session_id) {
+        session.files.remove(&q.file_id);
+    }
+}
+
 /// `GET /resume`: how far the previous attempt got.
 async fn resume(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(q): Query<UploadQuery>,
 ) -> axum::response::Response {
-    let Some(meta) = authorized(&state, &q) else {
+    let Some(meta) = authorized(&state, &q, addr.ip()) else {
         return (StatusCode::FORBIDDEN, "unknown session or file".to_string()).into_response();
     };
 
@@ -618,10 +815,11 @@ async fn resume(
 
 async fn upload(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(q): Query<UploadQuery>,
     body: Body,
 ) -> impl IntoResponse {
-    let Some(meta) = authorized(&state, &q) else {
+    let Some(meta) = authorized(&state, &q, addr.ip()) else {
         return (StatusCode::FORBIDDEN, "unknown session or file".to_string());
     };
     let offset = q.offset.unwrap_or(0);
@@ -726,8 +924,10 @@ async fn upload(
             Ok(Ok((_, got))) => {
                 let _ = tokio::fs::remove_file(&part).await;
                 eprintln!("✗ checksum mismatch for {} — discarded", meta.file_name);
+                // The spec asks for 422 here, not 500: the request was fine,
+                // the bytes were not.
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusCode::UNPROCESSABLE_ENTITY,
                     format!("checksum mismatch: sender said {expected}, we computed {got}"),
                 );
             }
@@ -756,6 +956,7 @@ async fn upload(
         );
     }
 
+    consume(&state, &q);
     eprintln!("✓ saved {}", path.display());
     (StatusCode::OK, String::new())
 }
@@ -914,6 +1115,31 @@ mod tests {
         let mut bigger = a.clone();
         bigger.size = 11;
         assert_ne!(part_key(&a), part_key(&bigger));
+    }
+
+    #[test]
+    fn range_parsing_only_trusts_the_open_ended_form() {
+        assert_eq!(parse_range_start("bytes=100-"), Some(100));
+        assert_eq!(parse_range_start("bytes=0-"), Some(0));
+        // Anything we would have to guess at is answered with the whole file.
+        assert_eq!(parse_range_start("bytes=0-99"), None);
+        assert_eq!(parse_range_start("bytes=-100"), None);
+        assert_eq!(parse_range_start("items=0-"), None);
+        assert_eq!(parse_range_start("bytes=abc-"), None);
+    }
+
+    #[test]
+    fn prefix_sha256_hashes_exactly_the_prefix() {
+        let path = std::env::temp_dir().join(format!("zapsend-prefix-{}.bin", std::process::id()));
+        std::fs::write(&path, b"abcdefghij").unwrap();
+        let got = prefix_sha256(&path, 4).unwrap().unwrap();
+        let mut h = Sha256::new();
+        h.update(b"abcd");
+        assert_eq!(got, hex::encode(h.finalize()));
+        // Longer than the file: nothing to describe.
+        assert!(prefix_sha256(&path, 11).unwrap().is_none());
+        assert!(prefix_sha256(&path, 10).unwrap().is_some());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

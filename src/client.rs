@@ -171,6 +171,19 @@ fn other_scheme(scheme: &str) -> &'static str {
 /// A client that trusts exactly this peer: its pinned certificate when we know
 /// the fingerprint, otherwise anything (a `--ip` target has no announcement to
 /// compare against, so the caller is told it is unverified).
+/// Answer an announcement the way the spec asks: one `POST /register` at the
+/// origin, so the peer learns about us now instead of at our next announce.
+/// Best effort — a peer that does not answer costs nothing.
+pub async fn register_back(peer: &Peer, me: &DeviceInfo) -> Result<()> {
+    let http = peer_client(peer)?;
+    let url = format!("{}{API}/register", peer.base_url());
+    let resp = http.post(&url).json(me).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("register answered {}", resp.status()));
+    }
+    Ok(())
+}
+
 fn peer_client(peer: &Peer) -> Result<reqwest::Client> {
     if peer.info.fingerprint.is_empty() {
         unpinned_client()
@@ -220,68 +233,173 @@ pub async fn prepare_download(
 }
 
 /// Pull one file into `dest`, verifying the SHA-256 when the peer published one.
+/// Download one file, continuing a `.part` left behind by an earlier attempt.
+///
+/// The bytes on disk are trusted only after the whole file's SHA-256 matches what
+/// the peer advertised, so a resumed download can never splice two different
+/// files together — the worst case is a restart.
 pub async fn download_file(
     peer: &Peer,
     session_id: &str,
     file: &FileMeta,
     dest: &Path,
 ) -> Result<u64> {
-    let http = peer_client(peer)?;
-    let url = format!(
-        "{}{API}/download?sessionId={}&fileId={}",
-        peer.base_url(),
-        encode_query(session_id),
-        encode_query(&file.id)
-    );
-
-    let resp = http.get(&url).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let snippet: String = body.chars().take(200).collect();
-        bail!(
-            "peer refused {status} for \"{}\": {snippet}",
-            file.file_name
-        );
-    }
-
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let mut out = tokio::fs::File::create(dest).await?;
-    let mut hasher = Sha256::new();
-    let mut stream = resp.bytes_stream();
-    let mut written = 0u64;
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await?;
-        written += chunk.len() as u64;
+    let part = part_path(dest);
+    let mut have = tokio::fs::metadata(&part)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if have > file.size {
+        // Bigger than the file cannot be ours: someone else's leftovers.
+        let _ = tokio::fs::remove_file(&part).await;
+        have = 0;
     }
-    tokio::io::AsyncWriteExt::flush(&mut out).await?;
 
-    if let Some(expected) = file.sha256.as_deref() {
-        let got = hex::encode(hasher.finalize());
-        if !got.eq_ignore_ascii_case(expected) {
-            let _ = tokio::fs::remove_file(dest).await;
+    let mut written = have;
+    if have != file.size || file.size == 0 {
+        let http = peer_client(peer)?;
+        let url = format!(
+            "{}{API}/download?sessionId={}&fileId={}",
+            peer.base_url(),
+            encode_query(session_id),
+            encode_query(&file.id)
+        );
+
+        // Never splice our bytes onto a file we cannot recognise: ask the peer
+        // to hash the prefix we already hold. A peer that cannot answer (a plain
+        // LocalSend app has no such route) gets a fresh download instead.
+        if have > 0 {
+            match verified_prefix(&http, &peer.base_url(), session_id, &file.id, &part, have).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "  {} does not match the peer's copy at byte {have} — starting over",
+                        file.file_name
+                    );
+                    let _ = tokio::fs::remove_file(&part).await;
+                    have = 0;
+                    written = 0;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  cannot verify the partial of {} ({e}) — starting over",
+                        file.file_name
+                    );
+                    let _ = tokio::fs::remove_file(&part).await;
+                    have = 0;
+                    written = 0;
+                }
+            }
+        }
+
+        let mut req = http.get(&url);
+        if have > 0 {
+            req = req.header(reqwest::header::RANGE, format!("bytes={have}-"));
+            eprintln!(
+                "  resuming {} at {} of {}",
+                file.file_name,
+                crate::human_bytes(have),
+                crate::human_bytes(file.size)
+            );
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            // Appending, `have` is what the server sent us from.
+        } else if status.is_success() {
+            if have > 0 {
+                eprintln!(
+                    "  peer sent the whole file instead of the rest — starting {} over",
+                    file.file_name
+                );
+            }
+            have = 0;
+            written = 0;
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(200).collect();
             bail!(
-                "checksum mismatch for \"{}\": peer said {expected}, we got {got}",
+                "peer refused {status} for \"{}\": {snippet}",
+                file.file_name
+            );
+        }
+
+        let mut out = if have > 0 {
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&part)
+                .await?
+        } else {
+            tokio::fs::File::create(&part).await?
+        };
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await?;
+            written += chunk.len() as u64;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut out).await?;
+    }
+
+    if file.size != 0 && written != file.size {
+        // Keep the partial on purpose: the next attempt continues from here.
+        bail!(
+            "short read for \"{}\": expected {} bytes, have {written} (kept for resume)",
+            file.file_name,
+            file.size
+        );
+    }
+    if let Some(expected) = file.sha256.as_deref() {
+        let got = sha256_file(&part)?;
+        if !got.eq_ignore_ascii_case(expected) {
+            let _ = tokio::fs::remove_file(&part).await;
+            bail!(
+                "checksum mismatch for \"{}\": peer said {expected}, we got {got} (partial discarded)",
                 file.file_name
             );
         }
     }
 
-    if file.size != 0 && written != file.size {
-        let _ = tokio::fs::remove_file(dest).await;
-        bail!(
-            "short read for \"{}\": expected {} bytes, got {written}",
-            file.file_name,
-            file.size
-        );
-    }
-
+    tokio::fs::rename(&part, dest).await?;
     Ok(written)
+}
+
+/// Does the first `have` bytes of `part` match what the peer has at that point?
+async fn verified_prefix(
+    http: &reqwest::Client,
+    base: &str,
+    session_id: &str,
+    file_id: &str,
+    part: &Path,
+    have: u64,
+) -> Result<bool> {
+    let url = format!(
+        "{base}{API}/verify-download?sessionId={}&fileId={}&offset={have}",
+        encode_query(session_id),
+        encode_query(file_id)
+    );
+    let resp = http.get(&url).send().await?;
+    if !resp.status().is_success() {
+        bail!("peer answered {}", resp.status());
+    }
+    let state: crate::protocol::ResumeState = resp.json().await?;
+    let mine = sha256_prefix(part, have)?;
+    Ok(mine.eq_ignore_ascii_case(&state.prefix_sha256))
+}
+
+/// `<dest>.part` — next to the target, so the resume survives a restart and a
+/// half file never looks like a finished one.
+fn part_path(dest: &Path) -> PathBuf {
+    let mut name = dest
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".part");
+    dest.with_file_name(name)
 }
 
 pub async fn send_files(
@@ -434,7 +552,9 @@ async fn upload_once(
 
     let url = format!(
         "{base}{API}/upload?sessionId={}&fileId={}&token={}&offset={offset}",
-        prepared.session_id, item.id, token
+        encode_query(&prepared.session_id),
+        encode_query(&item.id),
+        encode_query(&token)
     );
 
     let mut file = tokio::fs::File::open(&item.path).await?;
