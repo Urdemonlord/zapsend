@@ -86,6 +86,25 @@ pub enum Command {
         ask: bool,
     },
 
+    /// Check why discovery or sending is not working
+    Doctor {
+        /// Also test reachability of this device (alias or fingerprint prefix)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Test this address instead of looking a device up
+        #[arg(long, conflicts_with = "to")]
+        ip: Option<String>,
+
+        /// Seconds to listen for multicast answers
+        #[arg(long, default_value_t = 4)]
+        scan: u64,
+
+        /// Directory a receiver would write into
+        #[arg(long, default_value = "./zapsend-received")]
+        dir: PathBuf,
+    },
+
     /// Watch a folder and send whatever appears in it
     Daemon {
         /// Folder to watch

@@ -185,7 +185,7 @@ fn subnet_hosts(local: Ipv4Addr) -> Vec<Ipv4Addr> {
 
 /// Our address on the interface that owns the default route. The UDP connect
 /// only consults the routing table — nothing is sent.
-async fn local_ipv4() -> Option<Ipv4Addr> {
+pub(crate) async fn local_ipv4() -> Option<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
     sock.connect("8.8.8.8:80").await.ok()?;
     match sock.local_addr().ok()? {

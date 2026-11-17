@@ -164,6 +164,42 @@ zapsend daemon --dir ./outbox --to "Pixel" --settle 10   # big slow copies
 - The daemon runs the normal API server so peers can see it, which means it can
   also receive: anything pushed to it lands in `<dir>/.incoming`.
 
+### Diagnose a broken network
+
+```sh
+zapsend doctor
+zapsend doctor --to "Pixel"
+zapsend doctor --ip 192.168.1.42
+```
+
+Every line is something the tool actually observed, and the first ✗ is the
+answer:
+
+```
+zapsend doctor
+
+  version     0.0.11
+  device      "AZAZEL" (headless)
+  fingerprint ab9628b1
+  api port    53317
+  ✓ address   192.168.1.20 (default route)
+  ✓ port      :53317 is free
+  ✓ download  ./zapsend-received (writable)
+  ✓ multicast 1 device(s) answered
+              "Pixel" https 192.168.1.42:53317
+  ✓ peer      "Pixel" 192.168.1.42:53317 over https (LocalSend 2.1)
+              fingerprint matches what discovery announced
+```
+
+Checks, in the order they gate each other: an IPv4 address exists → the API port
+is free → the download dir is writable → multicast gets answers → a `/24` sweep
+gets answers → a named device answers `GET /info` and its certificate matches the
+fingerprint it announced. Exit code is non-zero when anything failed, so it can
+be used in a script.
+
+The `--ip` form is the one to reach for when discovery is silent: it skips
+multicast entirely and tests the connection you actually intend to use.
+
 ### Receive files
 
 ```sh
@@ -221,6 +257,7 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 |---|---|
 | Discovery | UDP multicast to `224.0.0.167:53317`, plus the `POST /register` handshake; `/24` unicast sweep when multicast is blocked |
 | Identity | Self-signed cert; the sender pins the peer's SHA-256 fingerprint |
+| Identity | `GET /info` so a peer can be checked before a transfer starts |
 | Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
 | Ports | Multicast always `53317`; API port configurable via `--port` |
 
@@ -246,10 +283,12 @@ They solve different problems, and the receiver needs the PIN because sending
 requires no confirmation on its side:
 
 - Wrong or missing PIN → `401`, and the sender is told to retry with `--pin`
-- Five wrong attempts → `429`, locked for 60 seconds
+- Five wrong attempts **from one address** → `429`, that address locked for 60s
 
 That throttle is what makes a 6-digit PIN meaningful; without it, 10^6 guesses
-over a LAN is an afternoon script.
+over a LAN is an afternoon script. It is scoped per source address on purpose: a
+global counter would let any stranger on the network lock the owner out of their
+own receiver by guessing wrong five times.
 
 ## Roadmap
 
@@ -267,14 +306,13 @@ over a LAN is an afternoon script.
 - [x] `--verbose` payload dumps for protocol debugging
 - [x] Local web UI (`zapsend ui`)
 - [x] `zapsend daemon` with a watch folder
+- [x] `zapsend doctor` — address, port, dir, multicast, sweep, peer reachability
+- [x] PIN lockout scoped per address instead of globally
 - [ ] Download API (reverse transfer: pull files *from* a peer)
 - [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)
 
 ## Known limitations
 
-- **PIN throttling is global, not per-peer.** Five wrong attempts lock the
-  receiver for everyone for a minute, so someone on the network can briefly
-  deny service to legitimate senders. Per-address throttling is on the roadmap.
 - **`--ip` without `--fingerprint` is unverified.** Sending to a raw address
   skips discovery, so there is no fingerprint to pin against; zapsend warns
   and accepts whatever certificate answers. Pass `--fingerprint` (get it from
@@ -287,6 +325,10 @@ over a LAN is an afternoon script.
   format follows the spec but nobody has run them.
 
 ## Troubleshooting
+
+Start with `zapsend doctor` — it checks the address, the port, the download dir,
+multicast, the `/24` sweep and (with `--to`/`--ip`) the peer itself, and the first
+✗ is the answer.
 
 **No devices found.** Most likely the network blocks multicast — common on
 guest wifi, corporate networks and some university APs. Use `--ip <address>`.

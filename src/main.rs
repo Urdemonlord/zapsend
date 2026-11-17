@@ -2,6 +2,7 @@ mod cli;
 mod client;
 mod daemon;
 mod discovery;
+mod doctor;
 mod identity;
 mod protocol;
 mod server;
@@ -160,6 +161,12 @@ async fn main() -> Result<()> {
             scan,
         } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
         Command::Receive { dir, pin, ask } => receive(&alias, port, dir, pin, ask).await,
+        Command::Doctor {
+            to,
+            ip,
+            scan,
+            dir,
+        } => doctor::run(&alias, port, doctor::Options { to, ip, scan, dir }).await,
         Command::Daemon {
             dir,
             to,

@@ -12,14 +12,14 @@ use axum::{
     extract::{ConnectInfo, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::{StreamExt, TryStreamExt};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,9 +40,17 @@ pub struct AppState {
 }
 
 /// A 6-digit PIN is only 10^6 guesses, so the PIN is useless without a
-/// throttle. Five wrong attempts lock preparation for a minute.
+/// throttle. Five wrong attempts from one address lock that address for a
+/// minute.
+///
+/// Per address, not globally: a global counter lets any stranger on the LAN
+/// lock the owner out of their own receiver by guessing wrong five times.
 const MAX_PIN_FAILURES: u32 = 5;
 const PIN_LOCKOUT: Duration = Duration::from_secs(60);
+/// Cap on remembered addresses, so a sweep of spoofed sources cannot grow this
+/// map without bound. Only locked addresses survive a prune, so forgetting an
+/// idle one costs nothing.
+const MAX_TRACKED_ADDRS: usize = 256;
 
 pub struct PinState {
     expected: Option<String>,
@@ -51,6 +59,11 @@ pub struct PinState {
 
 #[derive(Default)]
 struct PinInner {
+    per_addr: HashMap<IpAddr, Attempts>,
+}
+
+#[derive(Default)]
+struct Attempts {
     failures: u32,
     locked_until: Option<Instant>,
 }
@@ -68,39 +81,46 @@ impl PinState {
     }
 
     /// `Ok` when the supplied PIN is right, or when no PIN is required.
-    pub fn check(&self, supplied: Option<&str>) -> Result<(), (StatusCode, String)> {
+    /// `from` is the address the attempt came from, which is what the lockout is
+    /// scoped to.
+    pub fn check(&self, from: IpAddr, supplied: Option<&str>) -> Result<(), (StatusCode, String)> {
         let Some(expected) = self.expected.as_deref() else {
             return Ok(());
         };
 
         let mut inner = self.inner.lock().unwrap();
+        let now = Instant::now();
 
-        if let Some(until) = inner.locked_until {
-            let now = Instant::now();
+        let attempts = inner.per_addr.entry(from).or_default();
+
+        if let Some(until) = attempts.locked_until {
             if now < until {
                 let wait = (until - now).as_secs() + 1;
                 return Err((
                     StatusCode::TOO_MANY_REQUESTS,
-                    format!("too many attempts, retry in {wait}s"),
+                    format!("too many attempts from {from}, retry in {wait}s"),
                 ));
             }
-            inner.locked_until = None;
+            attempts.locked_until = None;
+            attempts.failures = 0;
         }
 
         match supplied {
             Some(given) if ct_eq(given, expected) => {
-                inner.failures = 0;
+                // A good PIN clears the slate for this address only.
+                inner.per_addr.remove(&from);
                 Ok(())
             }
             Some(_) => {
-                inner.failures += 1;
-                if inner.failures >= MAX_PIN_FAILURES {
-                    inner.failures = 0;
-                    inner.locked_until = Some(Instant::now() + PIN_LOCKOUT);
-                    Err((
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "too many attempts, locked for 60s".to_string(),
-                    ))
+                attempts.failures += 1;
+                if attempts.failures >= MAX_PIN_FAILURES {
+                    attempts.failures = 0;
+                    attempts.locked_until = Some(now + PIN_LOCKOUT);
+                    let msg = format!("too many attempts from {from}, locked for 60s");
+                    if inner.per_addr.len() > MAX_TRACKED_ADDRS {
+                        inner.per_addr.retain(|_, a| a.locked_until.is_some());
+                    }
+                    Err((StatusCode::TOO_MANY_REQUESTS, msg))
                 } else {
                     Err((StatusCode::UNAUTHORIZED, "invalid PIN".to_string()))
                 }
@@ -126,6 +146,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route(&format!("{API}/info"), get(info))
         .route(&format!("{API}/register"), post(register))
         .route(&format!("{API}/prepare-upload"), post(prepare_upload))
         .route(&format!("{API}/upload"), post(upload))
@@ -197,8 +218,16 @@ async fn confirm(from: &str, files: &HashMap<String, FileMeta>) -> bool {
     }
 }
 
+/// `GET /info`: who we are. Peers and `zapsend doctor` use this to tell a
+/// reachable device from a wrong port, and to compare the fingerprint we
+/// announced with the certificate we actually serve.
+async fn info(State(state): State<Arc<AppState>>) -> Json<DeviceInfo> {
+    Json(state.me.clone())
+}
+
 async fn prepare_upload(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Query(q): Query<PinQuery>,
     body: Bytes,
 ) -> axum::response::Response {
@@ -214,7 +243,7 @@ async fn prepare_upload(
         }
     };
 
-    if let Err((code, msg)) = state.pin.check(q.pin.as_deref()) {
+    if let Err((code, msg)) = state.pin.check(addr.ip(), q.pin.as_deref()) {
         eprintln!("✗ rejected transfer: {msg}");
         return (code, msg).into_response();
     }
@@ -413,5 +442,40 @@ mod tests {
         assert_eq!(safe_rel(".."), Path::new("unnamed"));
         assert_eq!(safe_rel(""), Path::new("unnamed"));
         assert_eq!(safe_rel("a\\b\\c.txt"), Path::new("a/b/c.txt"));
+    }
+
+    #[test]
+    fn pin_lockout_is_per_address_not_global() {
+        use std::net::Ipv4Addr;
+        let pin = PinState::new(Some("123456".into()));
+        let attacker = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 66));
+        let owner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        for _ in 0..MAX_PIN_FAILURES {
+            assert!(pin.check(attacker, Some("000000")).is_err());
+        }
+        // The attacker is locked...
+        let (code, _) = pin.check(attacker, Some("123456")).unwrap_err();
+        assert_eq!(code, StatusCode::TOO_MANY_REQUESTS);
+
+        // ...but the owner's phone is not, and a correct PIN still works.
+        assert!(pin.check(owner, Some("123456")).is_ok());
+    }
+
+    #[test]
+    fn right_pin_clears_earlier_failures_for_that_address() {
+        use std::net::Ipv4Addr;
+        let pin = PinState::new(Some("123456".into()));
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
+
+        for _ in 0..(MAX_PIN_FAILURES - 1) {
+            assert!(pin.check(addr, Some("111111")).is_err());
+        }
+        assert!(pin.check(addr, Some("123456")).is_ok());
+        // A fresh run of mistakes must not trip the lockout early.
+        for _ in 0..(MAX_PIN_FAILURES - 1) {
+            assert!(pin.check(addr, Some("111111")).is_err());
+        }
+        assert!(pin.check(addr, Some("123456")).is_ok());
     }
 }

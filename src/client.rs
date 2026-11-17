@@ -131,6 +131,46 @@ pub struct Upload {
     pub name: String,
 }
 
+/// Read a peer's own `info` document, the way `doctor` proves a device is
+/// reachable. Tries the advertised scheme first and the other one once, because
+/// a `--ip` target has no announcement telling us whether it serves HTTP or
+/// HTTPS.
+pub async fn fetch_info(peer: &Peer) -> Result<DeviceInfo> {
+    let http = if peer.info.fingerprint.is_empty() {
+        unpinned_client()?
+    } else {
+        pinned_client(&peer.info.fingerprint)?
+    };
+
+    let mut tried: Vec<String> = Vec::new();
+    for scheme in [peer.info.protocol.as_str(), other_scheme(&peer.info.protocol)] {
+        let url = format!("{scheme}://{}:{}{API}/info", peer.ip, peer.info.port);
+        match http.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.bytes().await?;
+                return serde_json::from_slice(&body)
+                    .with_context(|| format!("peer answered {url} with something that is not info"));
+            }
+            Ok(resp) => {
+                let code = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                let snippet: String = body.chars().take(120).collect();
+                tried.push(format!("{url} → {code} {snippet}"));
+            }
+            Err(e) => tried.push(format!("{url} → {e}")),
+        }
+    }
+    bail!("no info from the peer: {}", tried.join("; "))
+}
+
+fn other_scheme(scheme: &str) -> &'static str {
+    if scheme.eq_ignore_ascii_case("http") {
+        "https"
+    } else {
+        "http"
+    }
+}
+
 pub async fn send_files(
     peer: &Peer,
     me: &DeviceInfo,
