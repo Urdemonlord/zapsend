@@ -3,6 +3,7 @@ mod client;
 mod daemon;
 mod discovery;
 mod doctor;
+mod hosts;
 mod identity;
 mod protocol;
 mod pull;
@@ -166,6 +167,14 @@ async fn main() -> Result<()> {
     let port = cli.port;
 
     match cli.command {
+        Command::Trust {
+            name,
+            ip,
+            fingerprint,
+            pin,
+        } => trust(&name, &ip, fingerprint, pin).await,
+        Command::Hosts => print_hosts(),
+        Command::Forget { name } => forget(&name),
         Command::Discover { wait } => discover(&alias, port, wait).await,
         Command::Send {
             files,
@@ -500,7 +509,9 @@ async fn send(
             }
             (stack, peer)
         }
-        None => {
+        None => match peer_from_hosts(alias, port, &to).await? {
+            Some(pair) => pair,
+            None => {
             let stack = start(
                 alias,
                 port,
@@ -530,7 +541,8 @@ async fn send(
                 }
             }
             (stack, peer)
-        }
+            }
+        },
     };
 
     let uploads = collect_uploads(&files)?;
@@ -557,9 +569,135 @@ async fn send(
         );
     }
 
+    let pin = hosts::resolve_pin(pin, to.as_deref());
     client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await?;
     println!("✓ done");
     Ok(())
+}
+
+
+/// `zapsend trust` is one deliberate step: reach the machine, take its
+/// fingerprint (or check the one you were given), store all of it under a name.
+async fn trust(
+    name: &str,
+    raw_ip: &str,
+    fingerprint: Option<String>,
+    pin: Option<String>,
+) -> Result<()> {
+    let (addr, port) = parse_target(raw_ip)?;
+    let probe = Peer {
+        info: DeviceInfo {
+            zapsend_resume: false,
+            alias: name.to_string(),
+            version: PROTOCOL_VERSION.to_string(),
+            device_model: None,
+            device_type: None,
+            // Deliberately unset: we fetch first and compare ourselves, so a
+            // wrong fingerprint reads as a mismatch instead of a TLS error.
+            fingerprint: String::new(),
+            port,
+            protocol: "https".to_string(),
+            download: false,
+        },
+        ip: addr,
+    };
+
+    let stored = match (fingerprint, client::fetch_info(&probe).await) {
+        (Some(given), Ok(info)) => {
+            if !info.fingerprint.eq_ignore_ascii_case(&given) {
+                bail!(
+                    "fingerprint mismatch — you gave {}, {} announced {}\n  nothing was saved",
+                    identity::short_fingerprint(&given),
+                    raw_ip,
+                    info.fingerprint
+                );
+            }
+            eprintln!("✓ fingerprint matches what {raw_ip} announced");
+            given
+        }
+        (Some(given), Err(e)) => {
+            eprintln!("! {raw_ip} did not answer: {e:#}");
+            eprintln!("  saving the fingerprint you gave, without checking it against the machine");
+            given
+        }
+        (None, Ok(info)) => {
+            if info.fingerprint.len() != 64 {
+                bail!("{raw_ip} did not announce a fingerprint, nothing to pin");
+            }
+            eprintln!("! trusting {raw_ip} on first sight — compare this with the fingerprint");
+            eprintln!("  that machine printed when it started:");
+            eprintln!("    {}", info.fingerprint);
+            info.fingerprint
+        }
+        (None, Err(e)) => {
+            bail!("cannot reach {raw_ip}: {e:#}\n  pass --fingerprint to save it without a check")
+        }
+    };
+
+    let path = hosts::remember(name, &addr.to_string(), port, Some(stored.clone()), pin)?;
+    println!(
+        "✓ {name} → {addr}:{port}, pinned to {}",
+        identity::short_fingerprint(&stored)
+    );
+    println!("  saved in {}", path.display());
+    println!("  now: zapsend send <file> --to {name}");
+    Ok(())
+}
+
+fn print_hosts() -> Result<()> {
+    let map = hosts::load()?;
+    let path = hosts::path()?;
+    if map.is_empty() {
+        println!("no remembered machines");
+        println!("  add one: zapsend trust gpu-box --ip 100.64.0.7 --pin 4021");
+        println!("  file:    {}", path.display());
+        return Ok(());
+    }
+
+    println!("{:<20} {:<26} {:<5} {}", "NAME", "ADDRESS", "PIN", "FINGERPRINT");
+    for (name, entry) in &map {
+        println!(
+            "{:<20} {:<26} {:<5} {}",
+            name,
+            format!("{}:{}", entry.ip, entry.port),
+            if entry.pin.is_some() { "yes" } else { "-" },
+            entry
+                .fingerprint
+                .as_deref()
+                .map(identity::short_fingerprint)
+                .unwrap_or("none")
+        );
+    }
+    println!();
+    println!("  {}", path.display());
+    Ok(())
+}
+
+fn forget(name: &str) -> Result<()> {
+    if hosts::forget(name)? {
+        println!("✓ forgot {name}");
+        Ok(())
+    } else {
+        bail!("no machine named \"{name}\" — see `zapsend hosts`")
+    }
+}
+
+/// A `--to <name>` that is in the hosts file resolves before discovery: no
+/// multicast, no scan, and no flags needed. That is what makes an unattended
+/// send possible.
+pub(crate) async fn peer_from_hosts(
+    alias: &str,
+    port: u16,
+    to: &Option<String>,
+) -> Result<Option<(Stack, Peer)>> {
+    let Some(name) = to.as_deref() else {
+        return Ok(None);
+    };
+    let Some(peer) = hosts::peer(name).await? else {
+        return Ok(None);
+    };
+    let stack = local_only(alias, port)?;
+    Ok(Some((stack, peer)))
 }
 
 pub(crate) fn resolve_target(peers: &[Peer], target: Option<&str>) -> Result<Option<Peer>> {

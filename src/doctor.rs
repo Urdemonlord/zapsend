@@ -63,6 +63,11 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         println!("  api port    {} (fell back from {port})", stack.me.port);
     }
 
+    // Naming a device means discovery is not the thing being tested: a quiet
+    // multicast bus is expected on a VPN or across subnets, and reporting it as
+    // a failure would fail a perfectly good setup.
+    let named = opts.to.is_some() || opts.ip.is_some();
+
     // 1. Addresses. Without one there is nothing to announce and nothing to
     //    sweep, and every later failure is a symptom of this.
     let addrs = local_addrs().await;
@@ -116,6 +121,9 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     tokio::time::sleep(Duration::from_secs(opts.scan)).await;
     let peers = snapshot(&stack);
     if peers.is_empty() {
+        if !named {
+            problems.push("no device answered discovery".into());
+        }
         println!(
             "  ! multicast no answers in {}s",
             started.elapsed().as_secs()
@@ -143,12 +151,16 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 }
             }
             Ok(_) => {
-                problems.push("no device answered discovery".into());
-                println!("  ✗ sweep     nothing on this /24 either");
+                if !named {
+                    problems.push("no device answered discovery".into());
+                }
+                println!("  ! sweep     nothing on this /24 either");
             }
             Err(e) => {
-                problems.push("the /24 sweep failed".into());
-                println!("  ✗ sweep     failed: {e}");
+                if !named {
+                    problems.push("the /24 sweep failed".into());
+                }
+                println!("  ! sweep     failed: {e}");
             }
         }
     }
@@ -214,6 +226,14 @@ async fn resolve(stack: &Stack, opts: &Options, target: &str) -> Result<Peer> {
             },
             ip: addr,
         });
+    }
+
+    // A remembered machine is answered from the hosts file: doctor should test
+    // the address you actually use, not whatever multicast happens to find.
+    if let Some(map) = crate::hosts::load().ok() {
+        if let Some(entry) = opts.to.as_deref().and_then(|t| map.get(t)) {
+            return crate::hosts::peer_for(target, entry).await;
+        }
     }
 
     let known = snapshot(stack);

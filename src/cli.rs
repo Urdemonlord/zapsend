@@ -31,6 +31,37 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Remember a machine under a name, so later commands need no --ip,
+    /// --fingerprint or --pin
+    Trust {
+        /// The name to use later with --to
+        name: String,
+
+        /// Address of the machine (`100.64.0.7` or `100.64.0.7:53317`)
+        #[arg(long)]
+        ip: String,
+
+        /// Pin its certificate to this fingerprint (64 hex characters).
+        ///
+        /// Without it the fingerprint is taken from the machine on first sight:
+        /// compare it with what that machine prints when it starts.
+        #[arg(long)]
+        fingerprint: Option<String>,
+
+        /// PIN to remember for this machine
+        #[arg(long)]
+        pin: Option<String>,
+    },
+
+    /// List remembered machines
+    Hosts,
+
+    /// Forget a remembered machine
+    Forget {
+        /// Name to remove
+        name: String,
+    },
+
     /// Find devices on the local network
     Discover {
         /// How long to listen, in seconds

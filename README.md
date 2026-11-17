@@ -107,6 +107,41 @@ pixel                    192.168.1.42:53317   mobile     9f2c1ab4…
 thinkpad                 192.168.1.10:53317   desktop    c41e77d0…
 ```
 
+### Remember a machine, then stop typing flags
+
+Discovery only works on one subnet. For a machine you talk to often — a VPS, a
+box on a VPN — remember it once:
+
+```sh
+zapsend trust gpu-box --ip 100.64.0.7 --pin 4021
+```
+
+That reaches the machine, records its certificate fingerprint, and stores the
+address, port and PIN under the name. From then on:
+
+```sh
+zapsend send ./dataset --to gpu-box     # verified, PIN included
+zapsend pull --to gpu-box --dir ./out
+zapsend doctor --to gpu-box
+```
+
+```
+NAME                 ADDRESS                    PIN   FINGERPRINT
+gpu-box              100.64.0.7:53317           yes   9f2c1ab4
+```
+
+The fingerprint is what makes the connection *verified*: it is pinned, so a
+machine that shows up on that address with a different certificate is refused.
+If you already know the fingerprint, pass `--fingerprint` and `trust` will check
+it against the machine instead of trusting on first sight. Without a reachable
+machine, `--fingerprint` still lets you save it for later.
+
+`--pin` beats `ZAPSEND_PIN` beats the stored PIN, so a fleet can inject the
+secret through the environment instead of writing it to disk. The file lives at
+`~/.config/zapsend/hosts.json` (`%APPDATA%\zapsend\hosts.json` on Windows),
+is written `0600`, and `ZAPSEND_CONFIG` points elsewhere. `zapsend hosts` lists
+what you have, `zapsend forget <name>` removes one.
+
 ### Send files
 
 ```sh

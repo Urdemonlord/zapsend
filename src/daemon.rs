@@ -117,6 +117,10 @@ fn now_nanos() -> u128 {
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
+    let opts = Options {
+        pin: crate::hosts::resolve_pin(opts.pin, opts.to.as_deref()),
+        ..opts
+    };
     std::fs::create_dir_all(&opts.dir)?;
     let watch = std::fs::canonicalize(&opts.dir)?;
     let sent_dir = watch.join(".sent");
@@ -308,6 +312,10 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
             }
         }
         None => {
+            // A name in the hosts file needs no discovery at all.
+            if let Some(known) = crate::hosts::peer(opts.to.as_deref().unwrap_or("")).await? {
+                known
+            } else {
             // Cheap path first: the announce loop may already have filled the
             // registry, in which case there is nothing to wait for.
             let known = {
@@ -325,6 +333,7 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
             match found {
                 Some(p) => p,
                 None => bail!("no device found — is the other side running LocalSend?"),
+            }
             }
         }
     };

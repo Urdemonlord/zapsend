@@ -45,6 +45,11 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             }
         }
         None => {
+            if let Some((_stack, known)) =
+                crate::peer_from_hosts(alias, port, &opts.to).await?
+            {
+                known
+            } else {
             let stack = start(
                 alias,
                 port,
@@ -71,6 +76,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 }
             }
             found
+            }
         }
     };
 
@@ -100,7 +106,8 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         );
     }
 
-    let (session_id, files) = client::prepare_download(&peer, opts.pin.as_deref()).await?;
+    let pin = crate::hosts::resolve_pin(opts.pin.clone(), opts.to.as_deref());
+    let (session_id, files) = client::prepare_download(&peer, pin.as_deref()).await?;
     let mut wanted: Vec<_> = files
         .into_values()
         .filter(|f| {

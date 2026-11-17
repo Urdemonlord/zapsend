@@ -101,38 +101,49 @@ logged in, use "Run whether user is logged on or not", which needs stored
 credentials and a working network at boot — check `zapsend doctor` afterwards,
 it is the quickest way to see whether the port actually came up.
 
-## Getting the fingerprint
+## Teach each machine about the others, once
 
-The receiver prints it on startup (journal on Linux, the console on Windows), and
-`GET /info` returns it. Pin it on the other side:
+Every other machine gets one `trust` entry — address, port, fingerprint and PIN —
+and after that nothing needs a flag:
 
 ```sh
-zapsend pull --ip 100.64.0.7:53317 --pin 4021 \
-  --fingerprint ab9628b112df49e2cafce94d17bb062ad4cdaa115bfa009d761e2789444d7b60 \
-  --dir ./checkpoints --file latest.pt
+zapsend trust gpu-box --ip 100.64.0.7 --pin 4021
 ```
 
-There is no trust store yet, so that long flag goes on every unattended command —
-see [Limits](#limits). Until then, put it in the script once as a variable.
+`trust` reaches the machine, records its certificate fingerprint, and pins it, so
+the connection is verified even though discovery never ran. If you would rather
+check the fingerprint yourself, read it from the receiver's startup line
+(`journalctl -u zapsend` on Linux, the console on Windows) or from `/info`, then:
+
+```sh
+zapsend trust gpu-box --ip 100.64.0.7 --pin 4021 \
+  --fingerprint ab9628b112df49e2cafce94d17bb062ad4cdaa115bfa009d761e2789444d7b60
+```
+
+A fingerprint that does not match the machine is refused and nothing is written.
+`zapsend hosts` lists what you have; `zapsend forget <name>` removes one.
+
+`--pin` on the command line beats `ZAPSEND_PIN` beats the stored PIN, so you can
+keep the secret in the service environment instead of the file.
 
 ## Recipes
 
 **Pull a result off a server** (agent wrote it into `outbox/`):
 
 ```sh
-zapsend pull --ip 100.64.0.7:53317 --pin 4021 --fingerprint $FP --dir ./results
+zapsend pull --to gpu-box --dir ./results
 ```
 
 **Push a dataset to a server** (it lands in that machine's `inbox/`):
 
 ```sh
-zapsend send ./dataset --ip 100.64.0.9:53317 --pin 4021 --fingerprint $FP
+zapsend send ./dataset --to agent-b
 ```
 
-**Server to server, no laptop in the middle:** run `pull` on A pointing at B. The
+**Server to server, no laptop in the middle:** run `pull --to agent-b` on A. The
 bytes never leave your private network, and no third party sees them.
 
-**Let the machine send by itself:** `zapsend daemon --dir ./outbox --ip ...`
+**Let the machine send by itself:** `zapsend daemon --dir ./outbox --to agent-b`
 watches a folder, waits for files to settle, sends them, and renames them to
 `.sent`. That is the "agent drops output, plumbing delivers it" pattern — the
 agent does not need to know zapsend exists.
@@ -140,8 +151,11 @@ agent does not need to know zapsend exists.
 **Health check before you blame the tool:**
 
 ```sh
-zapsend doctor --ip 100.64.0.7:53317
+zapsend doctor --to gpu-box
 ```
+
+Naming a machine also means a quiet multicast bus is no longer counted as a
+failure — on a VPN nothing is supposed to answer discovery.
 
 ## Security, plainly
 
@@ -157,10 +171,12 @@ zapsend doctor --ip 100.64.0.7:53317
 ## Limits
 
 - `pull` does not resume yet — a broken pull restarts the file (`send` does resume).
-- No trust store and no host table yet: `--ip` and `--fingerprint` on every command.
 - No JSON output yet — use exit codes, or parse the human text.
-- Discovery does not cross subnets, by design of the protocol.
+- Discovery does not cross subnets, by design of the protocol; that is what
+  `trust` is for.
 - Files are never overwritten: a second `report.txt` becomes `report (1).txt`.
+- `trust` checks the machine's fingerprint, but nothing stops you from typing
+  `--fingerprint` for a machine that is down: it is stored unverified, and it is
+  on you to have copied the right value.
 
-The first two are the next things on the list, because they are exactly what
-stands between this setup and a fully unattended one.
+The first two are the next things on the list.
