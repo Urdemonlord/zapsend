@@ -51,6 +51,14 @@ cd zapsend && cargo build --release
 Single static binary. No runtime dependencies. Runs on x86_64 and aarch64,
 including a Raspberry Pi.
 
+## Running it across a fleet of machines
+
+If the machines are yours — servers running agents, a VPS, your laptop — and the
+data has to move between them without a cloud in the middle, read
+**[docs/agent-fleet.md](docs/agent-fleet.md)**: one `receive` per machine as a
+mailbox (`--dir` in, `--share` out), systemd unit and Windows scheduled task,
+pulling results back to the laptop, and what still needs typing by hand.
+
 ## Try it in 30 seconds
 
 `demo.sh` runs both ends on one machine and verifies the result:
