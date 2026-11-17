@@ -5,6 +5,7 @@ mod discovery;
 mod doctor;
 mod identity;
 mod protocol;
+mod pull;
 mod server;
 mod ui;
 mod verbose;
@@ -43,6 +44,8 @@ pub(crate) fn local_only(alias: &str, port: u16) -> Result<Stack> {
         sessions: Mutex::new(HashMap::new()),
         pin: server::PinState::new(None),
         ask: false,
+        share: None,
+        downloads: Mutex::new(HashMap::new()),
     });
     Ok(Stack {
         me,
@@ -70,6 +73,8 @@ pub(crate) async fn start(
     alias: &str,
     port: u16,
     download_dir: PathBuf,
+    // Directory to offer through the Download API, if any.
+    share: Option<PathBuf>,
     pin: Option<String>,
     ask: bool,
     api: ApiServer,
@@ -102,6 +107,12 @@ pub(crate) async fn start(
         }
     };
 
+    // Peers decide whether to call the Download API from this flag, so it has to
+    // match reality: `--share` turns the API on, and nothing else does.
+    if share.is_some() {
+        me.download = true;
+    }
+
     let state = Arc::new(server::AppState {
         me: me.clone(),
         registry: registry.clone(),
@@ -109,6 +120,8 @@ pub(crate) async fn start(
         sessions: Mutex::new(HashMap::new()),
         pin: server::PinState::new(pin),
         ask,
+        share,
+        downloads: Mutex::new(HashMap::new()),
     });
     let app = server::router(state.clone());
 
@@ -160,7 +173,36 @@ async fn main() -> Result<()> {
             pin,
             scan,
         } => send(&alias, port, files, to, ip, fingerprint, pin, scan).await,
-        Command::Receive { dir, pin, ask } => receive(&alias, port, dir, pin, ask).await,
+        Command::Receive {
+            dir,
+            pin,
+            ask,
+            share,
+        } => receive(&alias, port, dir, share, pin, ask).await,
+        Command::Pull {
+            to,
+            ip,
+            fingerprint,
+            pin,
+            dir,
+            file,
+            scan,
+        } => {
+            pull::run(
+                &alias,
+                port,
+                pull::Options {
+                    to,
+                    ip,
+                    fingerprint,
+                    pin,
+                    dir,
+                    file,
+                    scan,
+                },
+            )
+            .await
+        }
         Command::Doctor {
             to,
             ip,
@@ -316,6 +358,7 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
         port,
         PathBuf::from("./zapsend-received"),
         None,
+        None,
         false,
         ApiServer::Want,
     )
@@ -433,6 +476,7 @@ async fn send(
                 port,
                 PathBuf::from("./zapsend-received"),
                 None,
+                None,
                 false,
                 ApiServer::Want,
             )
@@ -530,6 +574,7 @@ async fn receive(
     alias: &str,
     port: u16,
     dir: PathBuf,
+    share: Option<PathBuf>,
     pin: Option<String>,
     ask: bool,
 ) -> Result<()> {
@@ -549,7 +594,26 @@ async fn receive(
     }
 
     std::fs::create_dir_all(&dir).context("creating download dir")?;
-    let stack = start(alias, port, dir.clone(), pin.clone(), ask, ApiServer::Required).await?;
+    if let Some(shared) = share.as_deref() {
+        if !shared.is_dir() {
+            bail!("--share needs an existing directory, {} is not one", shared.display());
+        }
+        eprintln!(
+            "! sharing {} through the Download API — anyone with the PIN (or anyone, if no PIN) can pull it",
+            shared.display()
+        );
+    }
+
+    let stack = start(
+        alias,
+        port,
+        dir.clone(),
+        share.clone(),
+        pin.clone(),
+        ask,
+        ApiServer::Required,
+    )
+    .await?;
 
     banner();
     println!("  listening   :{port}");
@@ -560,6 +624,10 @@ async fn receive(
         None => println!("  pin         none — anyone on this network can send to you"),
     }
     println!("  saving to   {}", dir.display());
+    match share.as_deref() {
+        Some(shared) => println!("  sharing     {} (Download API on)", shared.display()),
+        None => println!("  sharing     off — pass --share DIR to let peers pull files"),
+    }
     println!(
         "  mode        {}",
         if ask {

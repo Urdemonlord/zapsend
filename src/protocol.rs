@@ -107,6 +107,17 @@ pub struct PrepareUploadRequest {
     pub files: HashMap<String, FileMeta>,
 }
 
+/// Response to `POST /prepare-download`: our identity, a session id, and the
+/// metadata of every file in the share. No tokens here — the session id is what
+/// `/download` checks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareDownloadResponse {
+    pub info: DeviceInfo,
+    pub session_id: String,
+    pub files: HashMap<String, FileMeta>,
+}
+
 /// Response to `POST /prepare-upload`: a session id plus one token per file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

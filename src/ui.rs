@@ -296,7 +296,15 @@ pub async fn run(
     };
 
     std::fs::create_dir_all(&dir)?;
-    let stack = crate::start(alias, port, dir.clone(), pin.clone(), false, crate::ApiServer::Required)
+    let stack = crate::start(
+        alias,
+        port,
+        dir.clone(),
+        None,
+        pin.clone(),
+        false,
+        crate::ApiServer::Required,
+    )
         .await?;
 
     // Keep announcing: the page's device list is this registry, and peers only

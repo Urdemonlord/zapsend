@@ -5,7 +5,8 @@
 //! the certificate the peer presents must hash to exactly that value.
 
 use crate::protocol::{
-    DeviceInfo, FileMeta, Peer, PrepareUploadRequest, PrepareUploadResponse, API,
+    DeviceInfo, FileMeta, Peer, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse,
+    API,
 };
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
@@ -136,11 +137,7 @@ pub struct Upload {
 /// a `--ip` target has no announcement telling us whether it serves HTTP or
 /// HTTPS.
 pub async fn fetch_info(peer: &Peer) -> Result<DeviceInfo> {
-    let http = if peer.info.fingerprint.is_empty() {
-        unpinned_client()?
-    } else {
-        pinned_client(&peer.info.fingerprint)?
-    };
+    let http = peer_client(peer)?;
 
     let mut tried: Vec<String> = Vec::new();
     for scheme in [peer.info.protocol.as_str(), other_scheme(&peer.info.protocol)] {
@@ -169,6 +166,122 @@ fn other_scheme(scheme: &str) -> &'static str {
     } else {
         "http"
     }
+}
+
+/// A client that trusts exactly this peer: its pinned certificate when we know
+/// the fingerprint, otherwise anything (a `--ip` target has no announcement to
+/// compare against, so the caller is told it is unverified).
+fn peer_client(peer: &Peer) -> Result<reqwest::Client> {
+    if peer.info.fingerprint.is_empty() {
+        unpinned_client()
+    } else {
+        pinned_client(&peer.info.fingerprint)
+    }
+}
+
+/// Percent-encode a query value. File ids are relative paths and may contain
+/// spaces, `&`, `#` or non-ASCII names, all of which would otherwise corrupt the
+/// request line.
+fn encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Ask a peer that offers the Download API for its file list.
+pub async fn prepare_download(
+    peer: &Peer,
+    pin: Option<&str>,
+) -> Result<(String, HashMap<String, FileMeta>)> {
+    let http = peer_client(peer)?;
+    let mut url = format!("{}{API}/prepare-download", peer.base_url());
+    if let Some(pin) = pin {
+        url.push_str(&format!("?pin={}", encode_query(pin)));
+    }
+
+    let resp = http.post(&url).send().await?;
+    let status = resp.status();
+    let body = resp.bytes().await?;
+    if !status.is_success() {
+        let snippet: String = String::from_utf8_lossy(&body).chars().take(200).collect();
+        bail!("peer refused the download list: {status} {snippet}");
+    }
+
+    let parsed: PrepareDownloadResponse = serde_json::from_slice(&body)
+        .context("peer answered prepare-download with something that is not a file list")?;
+    Ok((parsed.session_id, parsed.files))
+}
+
+/// Pull one file into `dest`, verifying the SHA-256 when the peer published one.
+pub async fn download_file(
+    peer: &Peer,
+    session_id: &str,
+    file: &FileMeta,
+    dest: &Path,
+) -> Result<u64> {
+    let http = peer_client(peer)?;
+    let url = format!(
+        "{}{API}/download?sessionId={}&fileId={}",
+        peer.base_url(),
+        encode_query(session_id),
+        encode_query(&file.id)
+    );
+
+    let resp = http.get(&url).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(200).collect();
+        bail!(
+            "peer refused {status} for \"{}\": {snippet}",
+            file.file_name
+        );
+    }
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut out = tokio::fs::File::create(dest).await?;
+    let mut hasher = Sha256::new();
+    let mut stream = resp.bytes_stream();
+    let mut written = 0u64;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await?;
+        written += chunk.len() as u64;
+    }
+    tokio::io::AsyncWriteExt::flush(&mut out).await?;
+
+    if let Some(expected) = file.sha256.as_deref() {
+        let got = hex::encode(hasher.finalize());
+        if !got.eq_ignore_ascii_case(expected) {
+            let _ = tokio::fs::remove_file(dest).await;
+            bail!(
+                "checksum mismatch for \"{}\": peer said {expected}, we got {got}",
+                file.file_name
+            );
+        }
+    }
+
+    if file.size != 0 && written != file.size {
+        let _ = tokio::fs::remove_file(dest).await;
+        bail!(
+            "short read for \"{}\": expected {} bytes, got {written}",
+            file.file_name,
+            file.size
+        );
+    }
+
+    Ok(written)
 }
 
 pub async fn send_files(

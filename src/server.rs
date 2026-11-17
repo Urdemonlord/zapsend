@@ -6,11 +6,13 @@
 //!   POST /upload          — peer streams one file
 
 use crate::discovery::Registry;
-use crate::protocol::{DeviceInfo, FileMeta, PrepareUploadRequest, PrepareUploadResponse, API};
+use crate::protocol::{
+    DeviceInfo, FileMeta, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse, API,
+};
 use axum::{
     body::{Body, Bytes},
     extract::{ConnectInfo, Query, State},
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -23,7 +25,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio_util::io::StreamReader;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 pub struct Session {
     /// file id -> (metadata, token)
@@ -37,7 +39,21 @@ pub struct AppState {
     pub sessions: Mutex<HashMap<String, Session>>,
     pub pin: PinState,
     pub ask: bool,
+    /// Directory offered through the Download API. `None` disables it: sharing
+    /// is opt-in, never a side effect of receiving.
+    pub share: Option<PathBuf>,
+    /// Live download sessions. Without this the API would be an open file
+    /// server for the whole share dir instead of one the puller asked for.
+    pub downloads: Mutex<HashMap<String, Instant>>,
 }
+
+/// How long a `/prepare-download` session stays usable. Long enough for a slow
+/// phone to pull a big folder, short enough that a leaked id goes stale.
+const DOWNLOAD_SESSION_TTL: Duration = Duration::from_secs(3600);
+/// Bounds on what `--share` will enumerate, so pointing it at a home directory
+/// by accident does not produce a million-entry response.
+const MAX_SHARE_FILES: usize = 5_000;
+const MAX_SHARE_DEPTH: usize = 8;
 
 /// A 6-digit PIN is only 10^6 guesses, so the PIN is useless without a
 /// throttle. Five wrong attempts from one address lock that address for a
@@ -150,6 +166,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(&format!("{API}/register"), post(register))
         .route(&format!("{API}/prepare-upload"), post(prepare_upload))
         .route(&format!("{API}/upload"), post(upload))
+        .route(&format!("{API}/prepare-download"), post(prepare_download))
+        .route(&format!("{API}/download"), get(download))
         .with_state(state)
 }
 
@@ -223,6 +241,214 @@ async fn confirm(from: &str, files: &HashMap<String, FileMeta>) -> bool {
 /// announced with the certificate we actually serve.
 async fn info(State(state): State<Arc<AppState>>) -> Json<DeviceInfo> {
     Json(state.me.clone())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadListQuery {
+    #[serde(default)]
+    pin: Option<String>,
+    /// Offered by a browser refresh so the same session is reused.
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+/// `POST /prepare-download`: hand out the file list and a session id.
+///
+/// The spec puts no body here, and the PIN travels in the query string, which is
+/// what makes `zapsend pull --pin` work against a real LocalSend share.
+async fn prepare_download(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(q): Query<DownloadListQuery>,
+) -> axum::response::Response {
+    let Some(root) = state.share.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            "download api is off — start the receiver with --share DIR".to_string(),
+        )
+            .into_response();
+    };
+
+    if let Err((code, msg)) = state.pin.check(addr.ip(), q.pin.as_deref()) {
+        eprintln!("✗ rejected download list: {msg}");
+        return (code, msg).into_response();
+    }
+
+    let files = match walk_share(&root) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("✗ cannot read share dir {}: {e}", root.display());
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot read share dir: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    if files.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("nothing to share in {}", root.display()),
+        )
+            .into_response();
+    }
+
+    let session_id = q
+        .session_id
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    {
+        let mut live = state.downloads.lock().unwrap();
+        live.retain(|_, seen| seen.elapsed() < DOWNLOAD_SESSION_TTL);
+        live.insert(session_id.clone(), Instant::now());
+    }
+
+    eprintln!("→ download list: {} file(s) for {addr}", files.len());
+
+    (
+        StatusCode::OK,
+        Json(PrepareDownloadResponse {
+            info: state.me.clone(),
+            session_id,
+            files,
+        }),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadFileQuery {
+    session_id: String,
+    file_id: String,
+}
+
+/// `GET /download`: stream one file from the share.
+async fn download(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<DownloadFileQuery>,
+) -> axum::response::Response {
+    let Some(root) = state.share.clone() else {
+        return (StatusCode::NOT_FOUND, "download api is off".to_string()).into_response();
+    };
+
+    let known = {
+        let mut live = state.downloads.lock().unwrap();
+        live.retain(|_, seen| seen.elapsed() < DOWNLOAD_SESSION_TTL);
+        live.contains_key(&q.session_id)
+    };
+    if !known {
+        return (
+            StatusCode::FORBIDDEN,
+            "unknown or expired session — call prepare-download first".to_string(),
+        )
+            .into_response();
+    }
+
+    let Some(path) = share_path(&root, &q.file_id) else {
+        return (StatusCode::NOT_FOUND, "no such file in the share".to_string()).into_response();
+    };
+
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot open file: {e}"),
+            )
+                .into_response()
+        }
+    };
+    let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+
+    eprintln!("→ sending {}", path.display());
+
+    let mut resp = Body::from_stream(ReaderStream::new(file)).into_response();
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    if let Ok(len) = HeaderValue::from_str(&size.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, len);
+    }
+    resp
+}
+
+/// Every file under the share root, keyed by its path relative to that root.
+///
+/// Symlinks are skipped: following one would hand out a file from outside the
+/// directory the user actually chose to share.
+fn walk_share(root: &Path) -> std::io::Result<HashMap<String, FileMeta>> {
+    let mut out = HashMap::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > MAX_SHARE_DEPTH || out.len() >= MAX_SHARE_FILES {
+            break;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            if file_type.is_dir() {
+                stack.push((path, depth + 1));
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            out.insert(
+                rel.clone(),
+                FileMeta {
+                    id: rel,
+                    file_name: name,
+                    size: meta.len(),
+                    file_type: None,
+                    sha256: None,
+                },
+            );
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a requested file id inside the share root, or `None`.
+///
+/// Two layers on purpose: `safe_rel` strips `..` lexically, and the canonical
+/// check catches anything that still resolves outside the root (a symlinked
+/// parent directory, for instance).
+fn share_path(root: &Path, file_id: &str) -> Option<PathBuf> {
+    let rel = safe_rel(file_id);
+    // `walk_share` hides dotfiles, so serving one by id would be an inconsistency
+    // worth exploiting: `.git/config` is not in the listing but would still leak.
+    if rel
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let full = root.join(&rel).canonicalize().ok()?;
+    if !full.starts_with(&root) || !full.is_file() {
+        return None;
+    }
+    Some(full)
 }
 
 async fn prepare_upload(
@@ -477,5 +703,42 @@ mod tests {
             assert!(pin.check(addr, Some("111111")).is_err());
         }
         assert!(pin.check(addr, Some("123456")).is_ok());
+    }
+
+    #[test]
+    fn share_paths_cannot_escape_the_shared_dir() {
+        let root = std::env::temp_dir().join(format!("zapsend-share-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/ok.txt"), b"hi").unwrap();
+        std::fs::write(root.join("top.txt"), b"top").unwrap();
+
+        assert!(share_path(&root, "sub/ok.txt").is_some());
+        assert!(share_path(&root, "top.txt").is_some());
+        assert!(share_path(&root, "../../etc/passwd").is_none());
+        assert!(share_path(&root, "sub/../../etc/passwd").is_none());
+        assert!(share_path(&root, "missing.txt").is_none());
+        // A directory is not something to stream.
+        assert!(share_path(&root, "sub").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn walk_share_lists_nested_files_and_skips_dotfiles() {
+        let root = std::env::temp_dir().join(format!("zapsend-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("nested/b.txt"), b"bb").unwrap();
+        std::fs::write(root.join(".hidden"), b"x").unwrap();
+
+        let files = walk_share(&root).unwrap();
+        assert!(files.contains_key("a.txt"));
+        assert!(files.contains_key("nested/b.txt"));
+        assert!(!files.contains_key(".hidden"));
+        assert_eq!(files.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

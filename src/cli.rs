@@ -84,6 +84,43 @@ pub enum Command {
         /// Ask before accepting each transfer instead of accepting silently
         #[arg(long)]
         ask: bool,
+
+        /// Also offer this directory through the Download API, so a peer can
+        /// pull files from you (`zapsend pull`). Off by default.
+        #[arg(long, value_name = "DIR")]
+        share: Option<PathBuf>,
+    },
+
+    /// Pull files from a device that shares a folder (Download API)
+    Pull {
+        /// Source: alias or fingerprint prefix (from `zapsend discover`)
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Skip discovery and connect straight to this address
+        /// (`192.168.1.42` or `192.168.1.42:53400`)
+        #[arg(long, conflicts_with = "to")]
+        ip: Option<String>,
+
+        /// Pin the peer's certificate fingerprint (64 hex chars)
+        #[arg(long)]
+        fingerprint: Option<String>,
+
+        /// PIN the sharing device requires
+        #[arg(long)]
+        pin: Option<String>,
+
+        /// Where to save the pulled files
+        #[arg(long, default_value = "./zapsend-pulled")]
+        dir: PathBuf,
+
+        /// Only pull files whose path or name contains this text (repeatable)
+        #[arg(long = "file")]
+        file: Vec<String>,
+
+        /// Discovery scan duration in seconds (ignored with --ip)
+        #[arg(long, default_value_t = 4)]
+        scan: u64,
     },
 
     /// Check why discovery or sending is not working

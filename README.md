@@ -200,6 +200,40 @@ be used in a script.
 The `--ip` form is the one to reach for when discovery is silent: it skips
 multicast entirely and tests the connection you actually intend to use.
 
+### Pull files from a device that shares a folder
+
+The Download API runs the other way: the receiving side offers a directory, and
+you fetch from it.
+
+```sh
+# on the machine that has the files
+zapsend receive --share ./photos --pin 424242
+
+# on the machine that wants them
+zapsend pull --to "AZAZEL" --pin 424242
+zapsend pull --ip 192.168.1.20 --pin 424242 --dir ./downloads
+zapsend pull --ip 192.168.1.20 --file "2024-06"        # only matching paths
+```
+
+The receiver prints `sharing ./photos (Download API on)` when it is offering
+files, and its `info` advertises `"download": true` so peers know to ask.
+
+What `--share` will not do:
+
+- it never shares anything by default — receiving and sharing are separate
+- dotfiles are skipped, both in the listing and by direct file id
+- symlinks are not followed, and a requested path that resolves outside the
+  share root is refused
+- `/download` needs a session id from `prepare-download`, so the share is not an
+  open file server
+- the PIN guards the file list, with the same per-address lockout as uploads
+- a pull never overwrites: a second copy of `a.txt` lands as `a (1).txt`
+
+One deliberate limitation: the share is served over HTTPS only, so opening it in
+a browser fails on the self-signed certificate. The protocol's browser mode uses
+plain HTTP for exactly that reason, and zapsend does not implement it — use
+`zapsend pull` as the client.
+
 ### Receive files
 
 ```sh
@@ -259,6 +293,7 @@ Zapsend implements [LocalSend protocol v2](https://github.com/localsend/protocol
 | Identity | Self-signed cert; the sender pins the peer's SHA-256 fingerprint |
 | Identity | `GET /info` so a peer can be checked before a transfer starts |
 | Transfer | `POST /prepare-upload` for metadata, then `POST /upload` streamed |
+| Download | `POST /prepare-download` for the share listing, then `GET /download` per file |
 | Ports | Multicast always `53317`; API port configurable via `--port` |
 
 Everything is streamed — a 40 GB file does not touch RAM. Incoming file names
@@ -277,6 +312,12 @@ That means a machine-in-the-middle on the LAN cannot impersonate a peer, even
 though the certificate is self-signed. It also means the fingerprint is the
 whole security story: if you pass `--fingerprint` by hand, get it from
 `zapsend discover` on the same network, not from a chat message.
+
+Sharing is the one place where zapsend hands files *out* instead of taking them
+in, so it is deliberately opt-in and narrow: `--share DIR` is required, dotfiles
+and symlinks are excluded, `GET /download` demands a session id from
+`prepare-download`, and every requested path is resolved and checked against the
+share root before a byte is read.
 
 Pinning proves *who* you are talking to. A PIN proves *whether you are allowed*.
 They solve different problems, and the receiver needs the PIN because sending
@@ -308,7 +349,7 @@ own receiver by guessing wrong five times.
 - [x] `zapsend daemon` with a watch folder
 - [x] `zapsend doctor` — address, port, dir, multicast, sweep, peer reachability
 - [x] PIN lockout scoped per address instead of globally
-- [ ] Download API (reverse transfer: pull files *from* a peer)
+- [x] Download API — `receive --share DIR` plus `zapsend pull`
 - [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)
 
 ## Known limitations
