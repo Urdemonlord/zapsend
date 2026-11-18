@@ -14,7 +14,7 @@ use axum::{
     body::{Body, Bytes},
     extract::{ConnectInfo, DefaultBodyLimit, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
@@ -169,6 +169,8 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        // A share link handed to a human lands here, in a browser.
+        .route("/", get(index))
         .route(&format!("{API}/info"), get(info))
         .route(&format!("{API}/register"), post(register))
         // A sender may attach base64 previews for a whole batch; the default
@@ -275,6 +277,157 @@ struct DownloadListQuery {
 ///
 /// The spec puts no body here, and the PIN travels in the query string, which is
 /// what makes `zapsend pull --pin` work against a real LocalSend share.
+/// Open a download session and return its id.
+///
+/// Shared by `prepare-download` and the browser page: a session is what makes
+/// `download` serve one listing instead of the whole share dir, and both need
+/// exactly the same bookkeeping.
+fn open_download_session(state: &AppState) -> String {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut live = state.downloads.lock().unwrap();
+    live.retain(|_, seen| seen.elapsed() < DOWNLOAD_SESSION_TTL);
+    live.insert(session_id.clone(), Instant::now());
+    session_id
+}
+
+#[derive(Debug, Deserialize)]
+struct PageQuery {
+    pin: Option<String>,
+}
+
+/// `GET /`: the page a browser gets from a share link.
+///
+/// LocalSend's app serves one, which is why a device with no LocalSend can
+/// still take a file. Same listener and same PIN as everything else — no extra
+/// port, and nothing is exposed unless `--share` was passed.
+async fn index(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(q): Query<PageQuery>,
+) -> axum::response::Response {
+    let Some(root) = state.share.clone() else {
+        return (StatusCode::NOT_FOUND, "nothing is shared here".to_string()).into_response();
+    };
+
+    // A browser cannot send a header of our invention, so the PIN travels in the
+    // query string. It ends up in the address bar and in history — the same
+    // trade the LocalSend share link makes.
+    if state.pin.check(addr.ip(), q.pin.as_deref()).is_err() {
+        return Html(pin_form()).into_response();
+    }
+
+    let files = match walk_share(&root) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("✗ cannot read share dir {}: {e}", root.display());
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("cannot read share dir: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if files.is_empty() {
+        return Html(page(
+            "nothing to share",
+            "<p>This folder is empty.</p>",
+        ))
+        .into_response();
+    }
+
+    let session = open_download_session(&state);
+    let mut rows: Vec<(String, u64)> = files.into_iter().map(|(k, f)| (k, f.size)).collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let total: u64 = rows.iter().map(|(_, size)| *size).sum();
+
+    let mut body = String::new();
+    for (rel, size) in &rows {
+        let href = format!(
+            "{API}/download?sessionId={}&fileId={}",
+            session,
+            urlencode(rel)
+        );
+        body.push_str(&format!(
+            "<tr><td><a href=\"{href}\">{}</a></td><td class=\"s\">{}</td></tr>",
+            html_escape(rel),
+            crate::human_bytes(*size)
+        ));
+    }
+    let summary = format!(
+        "{} file(s), {} — served from {}",
+        rows.len(),
+        crate::human_bytes(total),
+        html_escape(&root.display().to_string())
+    );
+    Html(page(&summary, &format!("<table>{body}</table>"))).into_response()
+}
+
+fn pin_form() -> String {
+    page(
+        "PIN required",
+        r#"<p>This share is protected. Ask the owner for the PIN.</p>
+<form method="get" action="/">
+  <input name="pin" inputmode="numeric" autocomplete="one-time-code" placeholder="PIN" autofocus>
+  <button>Open</button>
+</form>"#,
+    )
+}
+
+/// The page shell. Deliberately plain: it has to work in a bare browser on a
+/// network with no internet, so no fonts, no scripts, no CDN.
+fn page(title: &str, body: &str) -> String {
+    format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{t}</title><style>
+:root{{color-scheme:dark}}
+body{{background:#0B0F10;color:#F8FAFC;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px;max-width:720px}}
+h1{{font-size:18px;margin:0 0 4px;color:#20E889;font-weight:600}}
+p{{margin:0 0 16px;color:#94a3b8}}
+table{{width:100%;border-collapse:collapse}}
+td{{padding:10px 0;border-bottom:1px solid #1e293b}}
+a{{color:#F8FAFC;text-decoration:none}}a:hover{{color:#20E889}}
+.s{{color:#64748b;text-align:right;white-space:nowrap;padding-left:16px;font-variant-numeric:tabular-nums}}
+input{{background:#111827;border:1px solid #334155;color:inherit;padding:10px;border-radius:6px;width:8em}}
+button{{background:#20E889;color:#0B0F10;border:0;padding:10px 16px;border-radius:6px;font-weight:600;margin-left:8px}}
+</style></head><body><h1>zapsend</h1><p>{b}</p></body></html>"#,
+        t = html_escape(title),
+        b = body
+    )
+}
+
+/// Minimal percent-encoding for a query value: everything outside the
+/// unreserved set becomes `%XX`. `fileId` is a path, so spaces, `#` and `&` all
+/// have to survive the trip.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// File names come from the filesystem and land in HTML: escape them.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 async fn prepare_download(
     State(state): State<Arc<AppState>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -318,13 +471,7 @@ async fn prepare_download(
     let session_id = q
         .session_id
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    {
-        let mut live = state.downloads.lock().unwrap();
-        live.retain(|_, seen| seen.elapsed() < DOWNLOAD_SESSION_TTL);
-        live.insert(session_id.clone(), Instant::now());
-    }
+        .unwrap_or_else(|| open_download_session(&state));
 
     eprintln!("→ download list: {} file(s) for {addr}", files.len());
 

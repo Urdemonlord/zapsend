@@ -222,7 +222,12 @@ peer has no such route, so a resumed pull from one of those simply starts over.
 
 ### Script it: `--json` and exit codes
 
-Every one-shot command takes `--json`: stdout becomes exactly one JSON object,
+Every one-shot command takes `--json`, and `ZAPSEND_JSON=1` sets it for a whole
+session so an agent does not have to pass the flag to each call. Detection of a
+pipe was considered and rejected: it would silently rewrite the output of every
+script already reading ours.
+
+With `--json`: stdout becomes exactly one JSON object,
 human progress stays on stderr, and the verdict stays in the exit code.
 
 ```sh
@@ -337,6 +342,12 @@ zapsend pull --ip 192.168.1.20 --file "2024-06"        # only matching paths
 The receiver prints `sharing ./photos (Download API on)` when it is offering
 files, and its `info` advertises `"download": true` so peers know to ask.
 
+**A browser works too.** `GET /` on the same port and the same PIN serves a page
+listing every shared file with download links — so a device with no LocalSend at
+all can take a file. No extra port and no extra listener: with no `--share`
+there is no page. The page has no scripts, no fonts and no CDN, because the
+networks this runs on often have no internet.
+
 What `--share` will not do:
 
 - it never shares anything by default — receiving and sharing are separate
@@ -348,10 +359,12 @@ What `--share` will not do:
 - the PIN guards the file list, with the same per-address lockout as uploads
 - a pull never overwrites: a second copy of `a.txt` lands as `a (1).txt`
 
-One deliberate limitation: the share is served over HTTPS only, so opening it in
-a browser fails on the self-signed certificate. The protocol's browser mode uses
-plain HTTP for exactly that reason, and zapsend does not implement it — use
-`zapsend pull` as the client.
+One deliberate limitation: the share is served over HTTPS only, so a browser
+warns about the self-signed certificate once before showing the page. The
+protocol's browser mode uses plain HTTP for exactly that reason; zapsend keeps
+one listener, so the warning stays. If the PIN is set, it rides in the query
+string (`/?pin=…`) — a browser cannot send a header of our invention, and the
+same trade is what makes LocalSend's own share link work.
 
 ### Receive files
 

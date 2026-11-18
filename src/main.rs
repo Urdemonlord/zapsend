@@ -181,7 +181,14 @@ async fn run() -> Result<()> {
 
     let cli = Cli::parse();
     verbose::set(cli.verbose);
-    JSON_MODE.store(cli.json, std::sync::atomic::Ordering::Relaxed);
+    // `--json` is per invocation, but an agent driving several commands should
+    // not have to remember it every time. `ZAPSEND_JSON=1` sets it once for the
+    // whole session. Auto-detecting a pipe was considered and rejected: it would
+    // silently rewrite the output of every existing script that reads ours.
+    let json_env = std::env::var("ZAPSEND_JSON")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    JSON_MODE.store(cli.json || json_env, std::sync::atomic::Ordering::Relaxed);
     let alias = cli.alias.clone();
     let port = cli.port;
 
