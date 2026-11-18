@@ -121,6 +121,40 @@ spec's legacy discovery), which gets through where multicast does not. If the
 default port is already held — usually by a running `receive` — they announce a
 free port instead of going blind.
 
+## Two networks: a VPS and a laptop
+
+Multicast does not cross subnets, so a VPS and a laptop on home Wi-Fi never see
+each other, and there is nothing to discover. Put both ends on Tailscale (or
+WireGuard) and address the peer directly:
+
+```sh
+# on the laptop, once
+zapsend trust vps --ip 100.64.0.7        # home VPS, stable private address
+
+# from the laptop, afterwards
+zapsend pull --to vps --file results --dir ./collected
+zapsend send ~/work/dump.sql --to vps
+```
+
+**Do not open 53317 to the internet** to make discovery work. The certificate is
+self-signed and the only authentication is a PIN — a public port is a public
+mailbox. Over a private link nothing is exposed, and zapsend still only needs a
+reachable `host:port`.
+
+Two things that surprise people on a VPN:
+
+- discovery finds nothing and that is correct — pass `--ip` (or a remembered
+  name from `zapsend trust`) every time;
+- if the peer moved ports, the port goes in the address, for `trust` as well:
+  `zapsend trust vps --ip 100.64.0.7:53477`, because `--port` is the port *this*
+  process listens on, not the one it dials.
+
+The service files (systemd unit, Windows scheduled task) and the "one mailbox
+per machine" layout are in **[docs/agent-fleet.md](docs/agent-fleet.md)**. The
+Tailscale hop itself is not exercised by this repo's tests — those run on
+loopback; what is verified is that zapsend needs nothing but a reachable
+`host:port`.
+
 ## Usage
 
 ### Find devices
