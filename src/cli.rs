@@ -80,7 +80,11 @@ pub enum Command {
         #[arg(required = true)]
         files: Vec<PathBuf>,
 
-        /// Target: alias or fingerprint prefix (from `zapsend discover`)
+        /// Target: alias or fingerprint prefix (from `zapsend discover`).
+        ///
+        /// A comma-separated list (`--to gpu-box,edge-1,edge-2`) sends the same
+        /// files to each host in turn and reports one summary. Every name must
+        /// already be in the hosts file.
         #[arg(long)]
         to: Option<String>,
 

@@ -528,6 +528,21 @@ async fn send(
     scan_secs: u64,
     retries: u32,
 ) -> Result<()> {
+    // `--to a,b,c` fans the same files out to a list. Resolving each name from
+    // the hosts file is the fleet case; a scan per name would need a human to
+    // pick between answers, which is the opposite of unattended.
+    if let Some(list) = to.as_deref().filter(|t| t.contains(',')) {
+        let names: Vec<&str> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if names.len() < 2 {
+            bail!("--to {list:?} needs at least two names");
+        }
+        return fan_out(alias, port, files, &names, pin, retries).await;
+    }
+
     // Straight-to-address sends need neither a server nor discovery, so they
     // work even while another instance owns the port.
     let (stack, peer) = match ip {
@@ -647,6 +662,103 @@ async fn send(
     Ok(())
 }
 
+
+/// One command, many peers, one summary. Sequential on purpose: one uplink
+/// shared by parallel uploads is slower for everybody, and a fleet push is
+/// usually logs and artifacts, not a race.
+async fn fan_out(
+    alias: &str,
+    port: u16,
+    files: Vec<PathBuf>,
+    names: &[&str],
+    pin: Option<String>,
+    retries: u32,
+) -> Result<()> {
+    let uploads = collect_uploads(&files)?;
+    let bytes: u64 = uploads
+        .iter()
+        .filter_map(|u| std::fs::metadata(&u.path).ok())
+        .map(|m| m.len())
+        .sum();
+    let stack = local_only(alias, port)?;
+    let mut report = Vec::new();
+    let mut failed = 0usize;
+    let mut delivered = 0u64;
+
+    eprintln!(
+        "sending {} file(s), {} to {} peer(s)",
+        uploads.len(),
+        human_bytes(bytes),
+        names.len()
+    );
+
+    for name in names {
+        let Some(peer) = hosts::peer(name).await? else {
+            // One unknown name must not cost the others their delivery.
+            eprintln!("✗ {name}: not in the hosts file — `zapsend trust {name} --ip <addr>` first");
+            report.push(serde_json::json!({
+                "name": name,
+                "ok": false,
+                "error": "not in the hosts file",
+            }));
+            failed += 1;
+            continue;
+        };
+        // Each host keeps its own remembered PIN; --pin overrides all of them.
+        let pin = hosts::resolve_pin(pin.clone(), Some(name));
+        eprintln!("→ {name} ({}:{})", peer.ip, peer.info.port);
+        match client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await {
+            Ok(()) => {
+                delivered += bytes;
+                eprintln!("✓ {name}");
+                report.push(serde_json::json!({
+                    "name": name,
+                    "ok": true,
+                    "alias": peer.info.alias,
+                    "ip": peer.ip.to_string(),
+                    "port": peer.info.port,
+                    "fingerprint": peer.info.fingerprint,
+                    "bytes": bytes,
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("✗ {name}: {e}");
+                report.push(serde_json::json!({
+                    "name": name,
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    if json_mode() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": failed == 0,
+                "command": "send",
+                "peers": report,
+                "count": names.len(),
+                "failed": failed,
+                "bytes": bytes,
+                "delivered": delivered,
+            })
+        );
+    } else {
+        println!(
+            "{} of {} peer(s), {} delivered",
+            names.len() - failed,
+            names.len(),
+            human_bytes(delivered)
+        );
+    }
+    if failed > 0 {
+        bail!("{failed} of {} peer(s) failed", names.len());
+    }
+    Ok(())
+}
 
 /// `zapsend trust` is one deliberate step: reach the machine, take its
 /// fingerprint (or check the one you were given), store all of it under a name.
