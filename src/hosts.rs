@@ -118,7 +118,7 @@ pub async fn peer_for(name: &str, entry: &Entry) -> Result<Peer> {
         peer.info.zapsend_resume = info.zapsend_resume;
         peer.info.download = info.download;
         peer.info.protocol = info.protocol;
-        peer.info.port = info.port;
+        // Port stays as given: it is the one that answered.
         if !info.alias.is_empty() {
             peer.info.alias = info.alias;
         }

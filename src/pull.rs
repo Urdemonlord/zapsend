@@ -142,7 +142,7 @@ async fn pull_one(
         .with_context(|| format!("cannot reach {}:{}", peer.ip, peer.info.port))?;
     peer.info.alias = info.alias.clone();
     peer.info.protocol = info.protocol.clone();
-    peer.info.port = info.port;
+    // Port stays as given: it is the one that answered.
     peer.info.download = info.download;
 
     if peer.info.fingerprint.is_empty() {
@@ -162,7 +162,28 @@ async fn pull_one(
     }
 
     let pin = crate::hosts::resolve_pin(opts.pin.clone(), name);
-    let (session_id, files) = client::prepare_download(&peer, pin.as_deref()).await?;
+    // A peer that shares over plain HTTP (the Download API in browser mode)
+    // answers https with a TLS error that reads like a broken machine. Flip the
+    // scheme once and keep the peer we flipped: the downloads that follow must
+    // use the same one.
+    let (session_id, files) = match client::prepare_download(&peer, pin.as_deref()).await {
+        Ok(pair) => pair,
+        Err(e) if format!("{e:#}").to_lowercase().contains("invalidcontenttype")
+            || format!("{e:#}").to_lowercase().contains("corrupt message") =>
+        {
+            peer.info.protocol = if peer.info.protocol.eq_ignore_ascii_case("http") {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            };
+            eprintln!(
+                "! {} did not answer over the first scheme — retrying over {}",
+                peer.ip, peer.info.protocol
+            );
+            client::prepare_download(&peer, pin.as_deref()).await?
+        }
+        Err(e) => return Err(e),
+    };
     let mut wanted: Vec<_> = files
         .into_values()
         .filter(|f| {

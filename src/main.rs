@@ -603,7 +603,11 @@ async fn send(
                 peer.info.zapsend_resume = info.zapsend_resume;
                 peer.info.download = info.download;
                 peer.info.protocol = info.protocol;
-                peer.info.port = info.port;
+                // The port is *not* taken from the answer: the address we just
+                // reached is the only one proven to work. A peer that announces
+                // a different port would otherwise send us somewhere we never
+                // verified — that is how `--ip host:53320` ended up talking to
+                // 53317 and failing against a real LocalSend implementation.
                 if !info.alias.is_empty() {
                     peer.info.alias = info.alias;
                 }

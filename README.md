@@ -25,14 +25,25 @@ film.mkv [============>               ] 1.2 GiB/4.1 GiB (12s)
 
 LocalSend already exists, and it is good. But it is a GUI app: there is no
 official way to send a file *from a server*, over SSH, from a cron job, or from
-a box with no display.
+a box with no display. The protocol even reserves `deviceType: "headless"` for
+exactly this, and the official CLI has been promised but is not out.
 
-The LocalSend protocol even reserves `deviceType: "headless"` for exactly this.
-Nobody filled that slot. Zapsend does.
+That gap has not gone unnoticed. `localsend-rs`, `lsq`, `lsend-cli` and
+`localsnd` all fill part of it, and some are further along than this one. **If
+you need one file on one device, any of them will do** — pick the one that
+works for you.
+
+Zapsend's angle is the fleet, not the single transfer: `send --to a,b`,
+`pull --to a,b`, `daemon --to a,b`, and `sync`, which asks the other side what it
+already holds. Several servers behaving like one mailbox, driven from cron, with
+JSON and exit codes an agent can read. If that is your problem, this is shaped
+for it. If it is not, rsync over SSH is better software than this, and it is
+thirty years older.
 
 Because zapsend speaks the real protocol, **the receiving device does not need
 zapsend**. Anything that runs LocalSend — Android, iOS, Windows, macOS, Linux —
-can talk to it.
+can talk to it. Interop is checked in both directions against `lsq`, an
+independent implementation: see `tests/interop-lsq.sh`.
 
 ## Install
 
@@ -460,7 +471,14 @@ own receiver by guessing wrong five times.
   and accepts whatever certificate answers. Pass `--fingerprint` (get it from
   `zapsend discover`) to close that hole. Discovery-based sends are always pinned.
 - Files are hashed (SHA-256) before upload, which costs an extra read pass.
-- No resume yet: a dropped connection means starting over.
+- **`sync` cannot replace a file.** LocalSend's upload has no overwrite, so a
+  file that exists on the peer with different bytes is reported as a conflict
+  and the run exits non-zero instead of adding a second copy.
+- **`sync` needs a zapsend receiver.** It asks `/api/zapsend/v1/manifest`, an
+  endpoint outside the LocalSend spec; against a plain LocalSend app it refuses
+  with that explanation rather than re-sending everything.
+- `sync` and `daemon` walk one folder level by level but do not follow
+  symlinks, by design.
 - **Interop is verified against LocalSend on Android only.** Both directions
   round-trip (phone→PC receive, PC→phone send) and the two see each other in
   discovery. iOS, macOS and the LocalSend desktop builds are untested; the wire
