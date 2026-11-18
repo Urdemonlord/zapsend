@@ -379,6 +379,33 @@ one listener, so the warning stays. If the PIN is set, it rides in the query
 string (`/?pin=…`) — a browser cannot send a header of our invention, and the
 same trade is what makes LocalSend's own share link work.
 
+### Keep a folder in step, without guessing
+
+`sync` asks the other side what it already has before sending anything. It needs
+a zapsend receiver at the far end (the endpoint is outside the LocalSend spec),
+and it never sends a file it cannot prove is missing:
+
+```sh
+zapsend sync ~/docs --to nas --dry-run   # what would move, and nothing moves
+zapsend sync ~/docs --to nas             # send only the missing files
+```
+
+```json
+{"bytes":12,"command":"sync","conflicts":[],"dryRun":false,"ok":true,"scanned":2,"sent":2,"skipped":0,"wouldSend":2}
+{"bytes":0,"command":"sync","conflicts":[],"dryRun":false,"ok":true,"scanned":2,"sent":0,"skipped":2,"wouldSend":0}
+```
+
+If the peer listens on something other than 53317, put the port in the address:
+`--ip 192.168.1.20:53477`. `--port` is the port *this* process would listen on,
+not the one it dials.
+
+The second run is the one that matters: nothing was sent, because the manifest
+said both files were already there with the same SHA-256. (`peer`, `dir` and the
+per-file `conflicts` paths are trimmed from the output above.) A file that exists on
+the peer with **different** contents is reported as a conflict and left alone —
+LocalSend's upload has no overwrite, so the alternative would be a silent second
+copy — and the exit code is non-zero so cron notices.
+
 ### Receive files
 
 ```sh
