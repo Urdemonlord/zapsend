@@ -2,6 +2,12 @@
   <img src="assets/logo.svg" alt="ZapSend" width="360">
 </p>
 
+<p align="center">
+  <a href="https://github.com/Urdemonlord/zapsend/actions/workflows/ci.yml"><img src="https://github.com/Urdemonlord/zapsend/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://crates.io/crates/zapsend"><img src="https://img.shields.io/crates/v/zapsend.svg" alt="crates.io"></a>
+  <a href="https://github.com/Urdemonlord/zapsend/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"></a>
+</p>
+
 # zapsend
 
 **LocalSend for the machines nobody is sitting in front of.**
@@ -58,7 +64,7 @@ independent implementation: see `tests/interop-lsq.sh`.
 ## Install
 
 ```sh
-cargo install --git https://github.com/Urdemonlord/zapsend
+cargo install zapsend
 ```
 
 Or build locally:
