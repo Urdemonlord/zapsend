@@ -8,6 +8,7 @@ mod identity;
 mod protocol;
 mod pull;
 mod server;
+mod sync;
 mod ui;
 mod verbose;
 
@@ -244,6 +245,30 @@ async fn run() -> Result<()> {
                     file,
                     scan,
                     retry,
+                },
+            )
+            .await
+        }
+        Command::Sync {
+            dir,
+            to,
+            ip,
+            fingerprint,
+            pin,
+            dry_run,
+            retries,
+        } => {
+            sync::run(
+                &alias,
+                port,
+                sync::Options {
+                    dir,
+                    to,
+                    ip,
+                    fingerprint,
+                    pin,
+                    dry_run,
+                    retries,
                 },
             )
             .await

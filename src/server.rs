@@ -183,6 +183,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(&format!("{API}/prepare-download"), post(prepare_download))
         .route(&format!("{API}/download"), get(download))
         .route(&format!("{API}/verify-download"), get(verify_download))
+        // Not part of LocalSend: `sync` has to know what the other side holds,
+        // and the spec has no call for that. A plain client never asks.
+        .route("/api/zapsend/v1/manifest", get(manifest))
         .with_state(state)
 }
 
@@ -966,6 +969,69 @@ async fn upload(
 
 /// Never silently clobber an existing file: `a.txt` -> `a (1).txt`, and keep
 /// the folder part a peer sent (`holiday/img.jpg`) instead of flattening it.
+#[derive(Deserialize)]
+struct ManifestQuery {
+    pin: Option<String>,
+}
+
+/// `GET /manifest`: what this receiver already holds, keyed by the relative path
+/// a sender would use. Costs one read of the whole receive folder, which is the
+/// honest price of not re-sending everything.
+async fn manifest(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Query(q): Query<ManifestQuery>,
+) -> impl IntoResponse {
+    if let Err((code, msg)) = state.pin.check(addr.ip(), q.pin.as_deref()) {
+        return (code, msg).into_response();
+    }
+    let root = state.download_dir.clone();
+    let files = tokio::task::spawn_blocking(move || list_tree(&root))
+        .await
+        .unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({ "files": files }))).into_response()
+}
+
+fn list_tree(root: &Path) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![(root.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Dot entries are our own bookkeeping (partial uploads, .sent).
+            if name.starts_with('.') {
+                continue;
+            }
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            // `file_type` does not follow symlinks: a link to a parent would walk
+            // forever, and a link out of the tree would answer for files the user
+            // never received.
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                stack.push((entry.path(), rel));
+                continue;
+            }
+            let Ok((size, sha)) = stored_prefix(&entry.path()) else {
+                continue;
+            };
+            out.insert(rel, serde_json::json!({ "size": size, "sha256": sha }));
+        }
+    }
+    out
+}
+
 fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
     let rel = safe_rel(file_name);
     let mut candidate = dir.join(&rel);

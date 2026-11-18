@@ -175,6 +175,50 @@ fn other_scheme(scheme: &str) -> &'static str {
     }
 }
 
+/// Ask a zapsend receiver what it already holds. `Ok(None)` means the peer does
+/// not answer this endpoint at all — that is what a plain LocalSend app looks
+/// like, and `sync` has to say so instead of assuming the folder is empty.
+pub async fn manifest(peer: &Peer, pin: Option<&str>) -> Result<Option<serde_json::Value>> {
+    let http = peer_client(peer)?;
+    let mut url = format!(
+        "{}://{}:{}/api/zapsend/v1/manifest",
+        peer.info.protocol, peer.ip, peer.info.port
+    );
+    if let Some(pin) = pin {
+        url.push_str(&format!("?pin={}", urlencode(pin)));
+    }
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("cannot ask {url} what it holds"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(160).collect();
+        bail!("the peer answered {code} to {url}: {snippet}");
+    }
+    let body = resp.bytes().await?;
+    Ok(Some(serde_json::from_slice(&body).with_context(
+        || format!("{url} answered with something that is not a manifest"),
+    )?))
+}
+
+/// PINs are digits, but a `--pin` is user input and goes into a query string.
+fn urlencode(raw: &str) -> String {
+    raw.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// A client that trusts exactly this peer: its pinned certificate when we know
 /// the fingerprint, otherwise anything (a `--ip` target has no announcement to
 /// compare against, so the caller is told it is unverified).

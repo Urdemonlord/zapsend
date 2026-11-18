@@ -195,6 +195,36 @@ pub enum Command {
         dir: PathBuf,
     },
 
+    /// Send only the files the other side does not already have
+    Sync {
+        /// Folder to sync (relative paths are kept)
+        dir: PathBuf,
+
+        /// Target: a name from the hosts file
+        #[arg(long)]
+        to: Option<String>,
+
+        /// Skip the hosts file and connect straight to this address
+        #[arg(long)]
+        ip: Option<String>,
+
+        /// Pin the peer's certificate to this fingerprint
+        #[arg(long)]
+        fingerprint: Option<String>,
+
+        /// PIN the peer asks for
+        #[arg(long)]
+        pin: Option<String>,
+
+        /// Say what would be sent and send nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Attempts per upload before giving up on it
+        #[arg(long, default_value_t = 3)]
+        retries: u32,
+    },
+
     /// Watch a folder and send whatever appears in it
     Daemon {
         /// Folder to watch
