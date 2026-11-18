@@ -23,10 +23,11 @@ film.mkv [============>               ] 1.2 GiB/4.1 GiB (12s)
 ✓ done
 ```
 
-> **Status: v0.0.22.** Send, receive, resume, folders, fan-out, fan-in, a
-> watched folder and sync all work, and interop is checked in all four
-> directions against an independent implementation. No GUI, and no users yet
-> beyond the author — see [roadmap](#roadmap).
+> **Status: v0.0.24.** Send, receive, resume, folders, fan-out, fan-in, a
+> watched folder, sync and a browser-readable share page all work. Interop is
+> checked in all four directions against an independent implementation, and the
+> share page is checked in a real browser at phone and desktop width. No GUI,
+> and no users yet beyond the author — see [roadmap](#roadmap).
 
 ---
 
