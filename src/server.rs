@@ -347,19 +347,32 @@ async fn index(
             session,
             urlencode(rel)
         );
+        // A nested file keeps its relative path (that is what `pull` and `sync`
+        // preserve), but the folder prefix is dimmed so it does not read as part
+        // of the file name.
+        let (dir, name) = match rel.rsplit_once('/') {
+            Some((dir, name)) => (
+                format!("<span class=\"d\">{}/</span>", html_escape(dir)),
+                html_escape(name),
+            ),
+            None => (String::new(), html_escape(rel)),
+        };
         body.push_str(&format!(
-            "<tr><td><a href=\"{href}\">{}</a></td><td class=\"s\">{}</td></tr>",
-            html_escape(rel),
+            "<tr><td class=\"n\"><a href=\"{href}\">{dir}{name}</a></td>\
+             <td class=\"s\"><span class=\"v\">↓</span><span class=\"z\">{}</span></td></tr>",
             crate::human_bytes(*size)
         ));
     }
-    let summary = format!(
-        "{} file(s), {} — served from {}",
-        rows.len(),
-        crate::human_bytes(total),
-        html_escape(&root.display().to_string())
-    );
-    Html(page(&summary, &format!("<table>{body}</table>"))).into_response()
+    // The path on disk is the operator's business, not the visitor's.
+    let summary = match rows.len() {
+        1 => format!("1 file, {}", crate::human_bytes(total)),
+        n => format!("{n} files, {}", crate::human_bytes(total)),
+    };
+    Html(page(
+        &summary,
+        &format!("<p>{summary}</p><table>{body}</table>"),
+    ))
+    .into_response()
 }
 
 fn pin_form() -> String {
@@ -379,18 +392,27 @@ fn page(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{t}</title><style>
+<title>zapsend — {t}</title><style>
 :root{{color-scheme:dark}}
 body{{background:#0B0F10;color:#F8FAFC;font:16px/1.5 system-ui,sans-serif;margin:0;padding:24px;max-width:720px}}
-h1{{font-size:18px;margin:0 0 4px;color:#20E889;font-weight:600}}
+h1{{font-size:18px;margin:0 0 4px;color:#20E889;font-weight:600;letter-spacing:-.01em}}
 p{{margin:0 0 16px;color:#94a3b8}}
 table{{width:100%;border-collapse:collapse}}
-td{{padding:10px 0;border-bottom:1px solid #1e293b}}
-a{{color:#F8FAFC;text-decoration:none}}a:hover{{color:#20E889}}
-.s{{color:#64748b;text-align:right;white-space:nowrap;padding-left:16px;font-variant-numeric:tabular-nums}}
-input{{background:#111827;border:1px solid #334155;color:inherit;padding:10px;border-radius:6px;width:8em}}
-button{{background:#20E889;color:#0B0F10;border:0;padding:10px 16px;border-radius:6px;font-weight:600;margin-left:8px}}
-</style></head><body><h1>zapsend</h1><p>{b}</p></body></html>"#,
+tr{{position:relative}}
+td{{padding:12px 0;border-bottom:1px solid #1e293b;vertical-align:top}}
+td.n{{padding-right:16px;overflow-wrap:anywhere;word-break:break-word}}
+a{{color:#F8FAFC;text-decoration:none}}
+tr:hover a{{color:#20E889}}
+/* The whole row is the target, not just the glyphs: on a phone a 20px tall
+   text link is a miss waiting to happen. */
+td.n a::after{{content:"";position:absolute;inset:0}}
+.d{{display:block;color:#94a3b8;font-size:13px;line-height:1.3}}
+.v{{color:#334155;display:inline-block;width:1.2em;text-align:right}}
+.z{{display:inline-block;min-width:5.5em;text-align:right}}
+.s{{color:#94a3b8;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;width:1%}}
+input{{background:#111827;border:1px solid #334155;color:inherit;padding:10px;border-radius:6px;width:8em;font-size:16px}}
+button{{background:#20E889;color:#0B0F10;border:0;padding:10px 16px;border-radius:6px;font-weight:600;margin-left:8px;font-size:16px}}
+</style></head><body><h1>zapsend</h1>{b}</body></html>"#,
         t = html_escape(title),
         b = body
     )
