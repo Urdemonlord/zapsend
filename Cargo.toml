@@ -6,8 +6,13 @@ rust-version = "1.75"
 description = "Headless, LocalSend-compatible file transfer over your local network"
 license = "MIT"
 repository = "https://github.com/Urdemonlord/zapsend"
+readme = "README.md"
+homepage = "https://github.com/Urdemonlord/zapsend#readme"
 keywords = ["localsend", "file-transfer", "lan", "airdrop", "cli"]
 categories = ["command-line-utilities", "network-programming"]
+# A binary, so nothing here is an API anyone can depend on; the docs and the
+# interop script only matter to people reading the repo.
+exclude = [".github", "docs/share-page-desktop.png", "tests"]
 
 [[bin]]
 name = "zapsend"

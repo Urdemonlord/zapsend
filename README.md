@@ -349,6 +349,12 @@ all can take a file. No extra port and no extra listener: with no `--share`
 there is no page. The page has no scripts, no fonts and no CDN, because the
 networks this runs on often have no internet.
 
+![The share page on a phone](docs/share-page.png)
+
+Two files, their sizes, and one tap to take each one. A nested file shows its
+folder on its own line above the name; the summary is a real sentence, and the
+path on the server's disk never appears in the HTML.
+
 What `--share` will not do:
 
 - it never shares anything by default — receiving and sharing are separate
