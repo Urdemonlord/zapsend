@@ -201,7 +201,10 @@ pub enum Command {
         #[arg(long, default_value = "./zapsend-outbox")]
         dir: PathBuf,
 
-        /// Target: alias or fingerprint prefix (from `zapsend discover`)
+        /// Target: alias or fingerprint prefix (from `zapsend discover`).
+        ///
+        /// A comma-separated list (`--to a,b`) or `all` pushes each file to
+        /// every named host, and only moves it to .sent once all of them have it.
         #[arg(long)]
         to: Option<String>,
 

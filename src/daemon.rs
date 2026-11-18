@@ -9,7 +9,7 @@ use crate::client;
 use crate::protocol::Peer;
 use crate::Stack;
 use anyhow::{bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -117,8 +117,20 @@ fn now_nanos() -> u128 {
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
+    // `--to a,b` or `--to all` means every name comes from the hosts file: a scan
+    // cannot answer "which of these five is edge-2?", and an unattended push has
+    // nobody to ask.
+    let targets = target_names(opts.to.as_deref())?;
+    if !targets.is_empty() && opts.ip.is_some() {
+        bail!("--ip takes a single target; use --to for a list");
+    }
     let opts = Options {
-        pin: crate::hosts::resolve_pin(opts.pin, opts.to.as_deref()),
+        pin: if targets.is_empty() {
+            crate::hosts::resolve_pin(opts.pin, opts.to.as_deref())
+        } else {
+            // Each host keeps its own remembered PIN; --pin overrides all of them.
+            opts.pin
+        },
         ..opts
     };
     std::fs::create_dir_all(&opts.dir)?;
@@ -192,7 +204,10 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     let mut last_error: HashMap<PathBuf, String> = HashMap::new();
     // Only used with --keep, and as a fallback when a move fails: anything in
     // here has been delivered already and must not be sent twice.
-    let mut delivered: HashMap<PathBuf, Sig> = HashMap::new();
+    // Sig plus the targets this file already reached: a file that landed on two
+    // of three peers must not be re-sent to those two, or the receiver
+    // collects duplicates.
+    let mut delivered: HashMap<PathBuf, (Sig, HashSet<String>)> = HashMap::new();
     let mut peer: Option<Peer> = None;
 
     loop {
@@ -211,9 +226,6 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                     continue;
                 }
             }
-            if delivered.get(&path) == Some(&sig) {
-                continue;
-            }
             if now_nanos().saturating_sub(sig.newest) < settle.as_nanos() {
                 continue;
             }
@@ -224,48 +236,101 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 .display()
                 .to_string();
 
-            let target = match ensure_peer(&stack, &opts, &mut peer).await {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("! {name}: {e}");
-                    peer = None;
+            // What is left for this file. A settled file that already reached
+            // every target is not looked at again.
+            let mut already: HashSet<String> = match delivered.get(&path) {
+                Some((s, keys)) if *s == sig => keys.clone(),
+                _ => HashSet::new(),
+            };
+            if targets.is_empty() {
+                if !already.is_empty() {
+                    continue;
+                }
+            } else if targets.iter().all(|t| already.contains(t)) {
+                continue;
+            }
+
+            let mut hops: Vec<(String, Peer)> = Vec::new();
+            if targets.is_empty() {
+                match ensure_peer(&stack, &opts, &mut peer).await {
+                    Ok(p) => hops.push((p.info.alias.clone(), p)),
+                    Err(e) => {
+                        eprintln!("! {name}: {e}");
+                        peer = None;
+                        tokio::time::sleep(Duration::from_secs(opts.interval)).await;
+                        continue;
+                    }
+                }
+            } else {
+                for t in targets.iter().filter(|t| !already.contains(*t)) {
+                    match crate::hosts::peer(t).await {
+                        Ok(Some(p)) => hops.push((t.clone(), p)),
+                        Ok(None) => eprintln!(
+                            "! {name}: {t} is not in the hosts file — `zapsend trust {t} --ip <addr>` first"
+                        ),
+                        Err(e) => eprintln!("! {name}: {t}: {e}"),
+                    }
+                }
+                if hops.is_empty() {
                     tokio::time::sleep(Duration::from_secs(opts.interval)).await;
                     continue;
                 }
-            };
+            }
 
-            match send_one(&stack, &opts, &target, &path).await {
-                Ok((files, bytes)) => {
-                    let how = if opts.keep {
-                        String::from("kept")
-                    } else {
-                        match move_to(&sent_dir, &path, &name) {
-                            Ok(dest) => format!("→ {}", dest.display()),
-                            Err(e) => {
-                                eprintln!("! {name}: sent but could not move it: {e}");
-                                String::from("kept")
-                            }
-                        }
-                    };
-                    delivered.insert(path.clone(), sig);
-                    last_error.remove(&path);
-                    println!(
-                        "✓ {name} ({files} file(s), {}) → \"{}\" {how}",
-                        crate::human_bytes(bytes),
-                        target.info.alias
-                    );
-                }
-                Err(e) => {
-                    let msg = format!("{e}");
-                    if last_error.get(&path).map(|s| s.as_str()) != Some(msg.as_str()) {
-                        eprintln!("! {name}: {msg}");
-                        last_error.insert(path.clone(), msg);
+            let mut sent_to: Vec<String> = Vec::new();
+            let mut failures: Vec<String> = Vec::new();
+            let mut files = 0usize;
+            let mut bytes = 0u64;
+            for (t, p) in &hops {
+                let pin = crate::hosts::resolve_pin(opts.pin.clone(), Some(t.as_str()));
+                match send_one(&stack, p, &path, pin.as_deref()).await {
+                    Ok((f, b)) => {
+                        files = f;
+                        bytes += b;
+                        sent_to.push(t.clone());
+                        already.insert(t.clone());
                     }
-                    // The address may have changed (DHCP, hotspot re-join), so
-                    // throw away what we resolved and look again next tick.
-                    peer = None;
-                    tokio::time::sleep(Duration::from_secs(opts.interval)).await;
+                    Err(e) => {
+                        // The address may have changed (DHCP, hotspot re-join), so
+                        // throw away what we resolved and look again next tick.
+                        peer = None;
+                        failures.push(format!("{t}: {e}"));
+                    }
                 }
+            }
+            delivered.insert(path.clone(), (sig, already.clone()));
+
+            let complete = if targets.is_empty() {
+                !sent_to.is_empty()
+            } else {
+                targets.iter().all(|t| already.contains(t))
+            };
+            if complete {
+                let how = if opts.keep {
+                    String::from("kept")
+                } else {
+                    match move_to(&sent_dir, &path, &name) {
+                        Ok(dest) => format!("→ {}", dest.display()),
+                        Err(e) => {
+                            eprintln!("! {name}: sent but could not move it: {e}");
+                            String::from("kept")
+                        }
+                    }
+                };
+                last_error.remove(&path);
+                println!(
+                    "✓ {name} ({files} file(s), {}) → {} {how}",
+                    crate::human_bytes(bytes),
+                    sent_to.join(", ")
+                );
+            }
+            if !failures.is_empty() {
+                let msg = failures.join("; ");
+                if last_error.get(&path).map(|s| s.as_str()) != Some(msg.as_str()) {
+                    eprintln!("! {name}: {msg} — kept for the next tick");
+                    last_error.insert(path.clone(), msg);
+                }
+                tokio::time::sleep(Duration::from_secs(opts.interval)).await;
             }
         }
 
@@ -273,7 +338,12 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     }
 }
 
-async fn send_one(stack: &Stack, opts: &Options, peer: &Peer, path: &Path) -> Result<(usize, u64)> {
+async fn send_one(
+    stack: &Stack,
+    peer: &Peer,
+    path: &Path,
+    pin: Option<&str>,
+) -> Result<(usize, u64)> {
     let uploads = crate::collect_uploads(std::slice::from_ref(&path.to_path_buf()))?;
     let bytes: u64 = uploads
         .iter()
@@ -282,8 +352,23 @@ async fn send_one(stack: &Stack, opts: &Options, peer: &Peer, path: &Path) -> Re
         .sum();
     // The daemon re-queues anything that fails, so a couple of in-place
     // attempts is enough; a long retry chain would stall the whole folder.
-    client::send_files(peer, &stack.me, &uploads, opts.pin.as_deref(), 2).await?;
+    client::send_files(peer, &stack.me, &uploads, pin, 2).await?;
     Ok((uploads.len(), bytes))
+}
+
+/// `--to a,b` and `--to all` both mean "these names, from the hosts file". An
+/// empty list means the old single-target path, which may still use discovery.
+fn target_names(to: Option<&str>) -> Result<Vec<String>> {
+    match to {
+        Some("all") => Ok(crate::hosts::load()?.keys().cloned().collect()),
+        Some(list) if list.contains(',') => Ok(list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()),
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// Resolve the target once and keep it: discovery is a 4 second round trip and
