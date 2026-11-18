@@ -907,8 +907,11 @@ async fn upload(
     let written = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
     if written < meta.size {
         // A short body is a dropped connection, not an error to throw away.
+        // 409, not 500: the receiver is fine, the transfer is not finished, and
+        // the body says exactly where to pick it up. A 500 tells a peer the
+        // server is broken, so it retries from zero instead of resuming.
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::CONFLICT,
             format!(
                 "incomplete: {written} of {} bytes stored — resume at offset {written}",
                 meta.size

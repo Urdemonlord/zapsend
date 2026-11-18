@@ -536,7 +536,13 @@ async fn stored_offset(http: &reqwest::Client, url: &str, item: &Pending) -> u64
     if local.eq_ignore_ascii_case(&state.prefix_sha256) {
         offset
     } else {
-        eprintln!("! {} changed since the last attempt — starting over", item.name);
+        // Safe but blunt: the receiver holds a partial that is not a prefix of
+        // this file (a stale `.part` from an earlier run, or the file changed).
+        // There is no endpoint to drop it, so start over and let `set_len` reset it.
+        eprintln!(
+            "! {} — the partial the receiver kept is not this file, starting over",
+            item.name
+        );
         0
     }
 }

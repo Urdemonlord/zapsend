@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "zapsend"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "axum",
