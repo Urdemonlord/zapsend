@@ -99,7 +99,12 @@ fn pinned_client(fingerprint_hex: &str) -> Result<reqwest::Client> {
 
     Ok(reqwest::Client::builder()
         .use_preconfigured_tls(config)
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // ponytail: a total `.timeout()` bounds the whole request, so any
+        // transfer longer than the bound dies mid-flight — a 300 MB file at
+        // 5 MB/s over Tailscale is 60 s. `read_timeout` is per-read inactivity:
+        // a peer that stops sending still fails, a slow one does not.
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()?)
 }
 
@@ -108,7 +113,9 @@ fn pinned_client(fingerprint_hex: &str) -> Result<reqwest::Client> {
 fn unpinned_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Same reasoning as `pinned_client`: bound inactivity, not duration.
+        .read_timeout(std::time::Duration::from_secs(60))
         .build()?)
 }
 
