@@ -4,10 +4,17 @@
 
 # zapsend
 
-**Headless, LocalSend-compatible file transfer over your local network.**
+**LocalSend for the machines nobody is sitting in front of.**
 
-Send files from your terminal to any device running [LocalSend](https://localsend.org) —
-no app to install on the other side, no account, no cloud, no size limit.
+One binary that speaks the real [LocalSend](https://localsend.org) protocol — so
+the other side needs nothing installed — and treats several hosts as one:
+fan-out, fan-in, a watched folder, and a sync that asks before it sends.
+
+| | |
+|---|---|
+| **Pick it when** | the other end cannot run rsync: a phone, a Windows box without SSH, a locked-down appliance. Or when several servers should behave like one mailbox, driven from cron. |
+| **Skip it when** | both ends have SSH — use rsync, it is thirty years better at it. Or when you need one file on one device: `lsq`, `lsend-cli` and `localsend-rs` all do that already. |
+| **It is not** | a GUI, a Syncthing replacement, or a cloud service. Nothing leaves your network. |
 
 ```
 $ zapsend send film.mkv --to pixel
@@ -16,8 +23,10 @@ film.mkv [============>               ] 1.2 GiB/4.1 GiB (12s)
 ✓ done
 ```
 
-> **Status: v0.0.1 — early.** Send and receive work. Resume, folders and a
-> daemon mode are not implemented yet. See [roadmap](#roadmap).
+> **Status: v0.0.22.** Send, receive, resume, folders, fan-out, fan-in, a
+> watched folder and sync all work, and interop is checked in all four
+> directions against an independent implementation. No GUI, and no users yet
+> beyond the author — see [roadmap](#roadmap).
 
 ---
 
