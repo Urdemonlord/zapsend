@@ -250,6 +250,10 @@ pub async fn download_file(
     session_id: &str,
     file: &FileMeta,
     dest: &Path,
+    // Bytes that actually crossed the wire, accumulated by the caller across
+    // retries and files. Distinct from the file size: a resumed download moves
+    // fewer bytes than it ends up holding, and a broken attempt still cost some.
+    wire: &mut u64,
 ) -> Result<u64> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -348,6 +352,7 @@ pub async fn download_file(
             let chunk = chunk?;
             tokio::io::AsyncWriteExt::write_all(&mut out, &chunk).await?;
             written += chunk.len() as u64;
+            *wire += chunk.len() as u64;
         }
         tokio::io::AsyncWriteExt::flush(&mut out).await?;
     }

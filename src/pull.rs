@@ -134,6 +134,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     );
 
     let mut total = 0u64;
+    let mut transferred = 0u64;
     let mut failed = 0usize;
     let mut session_id = session_id;
     let mut report: Vec<serde_json::Value> = Vec::new();
@@ -149,7 +150,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
-            match client::download_file(&peer, &session_id, file, &dest).await {
+            match client::download_file(&peer, &session_id, file, &dest, &mut transferred).await {
                 Ok(bytes) => {
                     finished = Some(bytes);
                     break;
@@ -214,6 +215,9 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 "count": wanted.len(),
                 "failed": failed,
                 "bytes": total,
+                // What the transfer cost, not what it produced: resumed and
+                // retried downloads move more or less than the final size.
+                "transferred": transferred,
             })
         );
     }
