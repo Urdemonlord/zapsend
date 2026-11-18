@@ -28,7 +28,33 @@ pub struct Options {
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
-    let mut peer = match opts.ip.as_deref() {
+    // `--to a,b,c` or `--to all` pulls from several peers at once, each into its
+    // own subdirectory: two machines can share a file name, and one overwrite is
+    // one data loss.
+    if let Some(list) = opts
+        .to
+        .as_deref()
+        .filter(|t| t.contains(',') || *t == "all")
+    {
+        if opts.ip.is_some() {
+            bail!("--ip takes a single peer; use --to for a list");
+        }
+        let names: Vec<String> = if list == "all" {
+            crate::hosts::load()?.keys().cloned().collect()
+        } else {
+            list.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        if names.is_empty() {
+            bail!("nothing to pull from: the hosts file is empty (`zapsend trust NAME --ip ADDR`)");
+        }
+        return pull_many(&opts, &names).await;
+    }
+
+    let peer = match opts.ip.as_deref() {
         Some(raw) => {
             let (addr, target_port) = parse_target(raw)?;
             Peer {
@@ -82,6 +108,33 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         }
     };
 
+    // One peer: the shape that was already there, printed and exit-coded as before.
+    let mut out = pull_one(&opts, peer, opts.to.as_deref(), &opts.dir).await?;
+    if crate::json_mode() {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("command".into(), serde_json::json!("pull"));
+        }
+        println!("{out}");
+    }
+    let failed = out["failed"].as_u64().unwrap_or(0);
+    if failed > 0 {
+        bail!(
+            "{failed} of {} file(s) failed",
+            out["count"].as_u64().unwrap_or(0)
+        );
+    }
+    Ok(())
+}
+
+/// Pull from one peer. Returns what happened instead of deciding what to print:
+/// the single-target path turns it into the familiar `pull --json` object, and
+/// the list path aggregates several of them.
+async fn pull_one(
+    opts: &Options,
+    mut peer: Peer,
+    name: Option<&str>,
+    dir: &Path,
+) -> Result<serde_json::Value> {
     // Ask the peer who it is before asking for files: that is where we learn
     // whether it offers the Download API at all, and which port it really serves.
     let info = client::fetch_info(&peer)
@@ -108,7 +161,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         );
     }
 
-    let pin = crate::hosts::resolve_pin(opts.pin.clone(), opts.to.as_deref());
+    let pin = crate::hosts::resolve_pin(opts.pin.clone(), name);
     let (session_id, files) = client::prepare_download(&peer, pin.as_deref()).await?;
     let mut wanted: Vec<_> = files
         .into_values()
@@ -130,7 +183,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         "pulling {} file(s) from \"{}\" into {}",
         wanted.len(),
         info.alias,
-        opts.dir.display()
+        dir.display()
     );
 
     let mut total = 0u64;
@@ -139,7 +192,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     let mut session_id = session_id;
     let mut report: Vec<serde_json::Value> = Vec::new();
     for file in &wanted {
-        let dest = unique_dest(&opts.dir, &file.file_name);
+        let dest = unique_dest(&dir, &file.file_name);
         let mut last_error = None;
         let mut finished = None;
         for attempt in 0..=opts.retry {
@@ -198,34 +251,114 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         }
     }
 
+    let out = serde_json::json!({
+        "ok": failed == 0,
+        "peer": {
+            "alias": info.alias,
+            "ip": peer.ip.to_string(),
+            "port": peer.info.port,
+            "fingerprint": peer.info.fingerprint,
+        },
+        "dir": dir.display().to_string(),
+        "files": report,
+        "count": wanted.len(),
+        "failed": failed,
+        "bytes": total,
+        // What the transfer cost, not what it produced: resumed and retried
+        // downloads move more or less than the final size.
+        "transferred": transferred,
+    });
+    eprintln!("{} file(s), {}", wanted.len(), human_bytes(total));
+    Ok(out)
+}
+
+/// Pull from every named peer in turn. One unreachable machine must not cost the
+/// others their files, so each failure is recorded and the rest still run.
+async fn pull_many(opts: &Options, names: &[String]) -> Result<()> {
+    let mut peers_report: Vec<serde_json::Value> = Vec::new();
+    let mut failed_peers = 0usize;
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut transferred = 0u64;
+
+    for name in names {
+        let Some(peer) = crate::hosts::peer(name).await? else {
+            eprintln!("✗ {name}: not in the hosts file — `zapsend trust {name} --ip <addr>` first");
+            peers_report.push(serde_json::json!({
+                "name": name,
+                "ok": false,
+                "error": "not in the hosts file",
+            }));
+            failed_peers += 1;
+            continue;
+        };
+        let dir = opts.dir.join(name);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+        eprintln!("→ {name} ({})", peer.ip);
+        match pull_one(opts, peer, Some(name), &dir).await {
+            Ok(v) => {
+                let peer_failed = v["failed"].as_u64().unwrap_or(0);
+                files += v["count"].as_u64().unwrap_or(0);
+                bytes += v["bytes"].as_u64().unwrap_or(0);
+                transferred += v["transferred"].as_u64().unwrap_or(0);
+                if peer_failed > 0 {
+                    failed_peers += 1;
+                }
+                peers_report.push(serde_json::json!({
+                    "name": name,
+                    "ok": peer_failed == 0,
+                    "alias": v["peer"]["alias"],
+                    "ip": v["peer"]["ip"],
+                    "port": v["peer"]["port"],
+                    "dir": v["dir"],
+                    "files": v["files"],
+                    "count": v["count"],
+                    "failed": v["failed"],
+                    "bytes": v["bytes"],
+                    "transferred": v["transferred"],
+                }));
+            }
+            Err(e) => {
+                failed_peers += 1;
+                eprintln!("✗ {name}: {e}");
+                peers_report.push(serde_json::json!({
+                    "name": name,
+                    "ok": false,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
     if crate::json_mode() {
         println!(
             "{}",
             serde_json::json!({
-                "ok": failed == 0,
+                "ok": failed_peers == 0,
                 "command": "pull",
-                "peer": {
-                    "alias": info.alias,
-                    "ip": peer.ip.to_string(),
-                    "port": peer.info.port,
-                    "fingerprint": peer.info.fingerprint,
-                },
-                "dir": opts.dir.display().to_string(),
-                "files": report,
-                "count": wanted.len(),
-                "failed": failed,
-                "bytes": total,
-                // What the transfer cost, not what it produced: resumed and
-                // retried downloads move more or less than the final size.
+                "peers": peers_report,
+                "count": names.len(),
+                "failed": failed_peers,
+                // In a list, `files` is how many arrived; the per-peer arrays
+                // are in peers[].files.
+                "files": files,
+                "bytes": bytes,
                 "transferred": transferred,
             })
         );
+    } else {
+        println!(
+            "{} of {} peer(s), {} file(s), {}",
+            names.len() - failed_peers,
+            names.len(),
+            files,
+            human_bytes(bytes)
+        );
     }
-
-    if failed > 0 {
-        bail!("{failed} of {} file(s) failed", wanted.len());
+    if failed_peers > 0 {
+        bail!("{failed_peers} of {} peer(s) failed", names.len());
     }
-    eprintln!("{} file(s), {}", wanted.len(), human_bytes(total));
     Ok(())
 }
 

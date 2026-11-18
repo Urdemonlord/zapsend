@@ -139,7 +139,10 @@ pub enum Command {
 
     /// Pull files from a device that shares a folder (Download API)
     Pull {
-        /// Source: alias or fingerprint prefix (from `zapsend discover`)
+        /// Source: alias or fingerprint prefix (from `zapsend discover`).
+        ///
+        /// A comma-separated list (`--to a,b`) or `all` pulls from each trusted
+        /// host in turn, into its own subdirectory of --dir.
         #[arg(long)]
         to: Option<String>,
 

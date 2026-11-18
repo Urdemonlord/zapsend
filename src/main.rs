@@ -528,16 +528,24 @@ async fn send(
     scan_secs: u64,
     retries: u32,
 ) -> Result<()> {
-    // `--to a,b,c` fans the same files out to a list. Resolving each name from
-    // the hosts file is the fleet case; a scan per name would need a human to
-    // pick between answers, which is the opposite of unattended.
-    if let Some(list) = to.as_deref().filter(|t| t.contains(',')) {
-        let names: Vec<&str> = list
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-        if names.len() < 2 {
+    // `--to a,b,c` (or `--to all`, every trusted host) fans the same files out to
+    // a list. Resolving each name from the hosts file is the fleet case; a scan
+    // per name would need a human to pick between answers, which is the opposite
+    // of unattended.
+    if let Some(list) = to.as_deref().filter(|t| t.contains(',') || *t == "all") {
+        let names: Vec<String> = if list == "all" {
+            hosts::load()?.keys().cloned().collect()
+        } else {
+            list.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        if names.is_empty() {
+            bail!("nothing to send to: the hosts file is empty (`zapsend trust NAME --ip ADDR`)");
+        }
+        if list != "all" && names.len() < 2 {
             bail!("--to {list:?} needs at least two names");
         }
         return fan_out(alias, port, files, &names, pin, retries).await;
@@ -670,7 +678,7 @@ async fn fan_out(
     alias: &str,
     port: u16,
     files: Vec<PathBuf>,
-    names: &[&str],
+    names: &[String],
     pin: Option<String>,
     retries: u32,
 ) -> Result<()> {
