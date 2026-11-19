@@ -773,6 +773,7 @@ fn walk_share(root: &Path) -> std::io::Result<HashMap<String, FileMeta>> {
                     file_name: name,
                     size: meta.len(),
                     sha256: None,
+                    replace: false,
                 },
             );
         }
@@ -1151,7 +1152,14 @@ async fn upload(
         }
     }
 
-    let path = unique_path(&state.download_dir, &meta.file_name);
+    // A replace upload lands on the exact path, not `name (1).ext` — but only
+    // after the bytes were hash-verified above. Anything else keeps the
+    // never-clobber behaviour.
+    let path = if meta.replace {
+        state.download_dir.join(safe_rel(&meta.file_name))
+    } else {
+        unique_path(&state.download_dir, &meta.file_name)
+    };
     if let Some(parent) = path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             return (
@@ -1160,7 +1168,11 @@ async fn upload(
             );
         }
     }
-    if let Err(e) = tokio::fs::rename(&part, &path).await {
+    if meta.replace {
+        if let Err(e) = place_replacement(&state.download_dir, &path, &part).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e);
+        }
+    } else if let Err(e) = tokio::fs::rename(&part, &path).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("cannot move the finished file into place: {e}"),
@@ -1170,6 +1182,48 @@ async fn upload(
     consume(&state, &q);
     eprintln!("✓ saved {}", path.display());
     (StatusCode::OK, String::new())
+}
+
+/// Move a hash-verified replacement into place: the file already there is
+/// moved aside first, and only deleted once the new file is in place. A
+/// failed rename restores the old file, so a replace never loses bytes it
+/// cannot prove it replaced. Backups live under a dot-directory, which
+/// `list_tree` (and therefore the manifest) never reports.
+async fn place_replacement(dir: &Path, target: &Path, part: &Path) -> Result<(), String> {
+    if !target.exists() {
+        return tokio::fs::rename(part, target)
+            .await
+            .map_err(|e| format!("cannot move the finished file into place: {e}"));
+    }
+    let backup = replaced_backup_path(dir, target);
+    if let Some(parent) = backup.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("cannot create the backup folder: {e}"))?;
+    }
+    tokio::fs::rename(target, &backup)
+        .await
+        .map_err(|e| format!("cannot move the old file aside: {e}"))?;
+    if let Err(e) = tokio::fs::rename(part, target).await {
+        let _ = tokio::fs::rename(&backup, target).await;
+        return Err(format!(
+            "cannot move the finished file into place: {e} (the old file was restored)"
+        ));
+    }
+    let _ = tokio::fs::remove_file(&backup).await;
+    Ok(())
+}
+
+/// `.zapsend-replaced/<relative path>.<nanos>` — unique per replace, and
+/// dot-prefixed so it never shows up in a manifest or a share listing.
+fn replaced_backup_path(dir: &Path, target: &Path) -> PathBuf {
+    let rel = target.strip_prefix(dir).unwrap_or(target);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    dir.join(".zapsend-replaced")
+        .join(format!("{}.{nanos}", rel.display()))
 }
 
 /// Never silently clobber an existing file: `a.txt` -> `a (1).txt`, and keep
@@ -1380,6 +1434,7 @@ mod tests {
             size: 10,
             file_type: None,
             sha256: Some("aa".to_string()),
+            replace: false,
         };
         let mut other = a.clone();
         other.sha256 = Some("bb".to_string());

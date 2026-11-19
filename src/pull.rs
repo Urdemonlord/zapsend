@@ -3,8 +3,8 @@
 //! The sender runs a receiver with `--share DIR`; this asks for the file list and
 //! streams the files back. Protocol v2, section 5.
 
-use crate::protocol::{DeviceInfo, Peer, PROTOCOL_VERSION};
-use crate::{client, human_bytes, identity, parse_target, resolve_target, scan, start, ApiServer};
+use crate::protocol::Peer;
+use crate::{client, human_bytes, identity, resolve_target, scan, start, ApiServer};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,8 @@ pub struct Options {
     pub ip: Option<String>,
     /// Pin the peer's certificate (64 hex chars).
     pub fingerprint: Option<String>,
+    /// Trust the address on first sight (see --tofu in the CLI help).
+    pub tofu: bool,
     /// PIN the sharing device requires.
     pub pin: Option<String>,
     /// Where to save the files.
@@ -56,21 +58,8 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
 
     let peer = match opts.ip.as_deref() {
         Some(raw) => {
-            let (addr, target_port) = parse_target(raw)?;
-            Peer {
-                info: DeviceInfo {
-            zapsend_resume: false,
-                    alias: raw.to_string(),
-                    version: PROTOCOL_VERSION.to_string(),
-                    device_model: None,
-                    device_type: None,
-                    fingerprint: opts.fingerprint.clone().unwrap_or_default(),
-                    port: target_port,
-                    protocol: "https".to_string(),
-                    download: false,
-                },
-                ip: addr,
-            }
+            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "pull files from")
+                .await?
         }
         None => {
             if let Some((_stack, known)) =
@@ -145,9 +134,11 @@ async fn pull_one(
     // Port stays as given: it is the one that answered.
     peer.info.download = info.download;
 
-    if peer.info.fingerprint.is_empty() {
-        eprintln!("! unverified peer: pass --fingerprint to pin its certificate");
-    } else {
+    crate::require_verified(
+        &peer,
+        "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+    )?;
+    if !peer.info.fingerprint.is_empty() {
         eprintln!(
             "  pinned to {}",
             identity::short_fingerprint(&peer.info.fingerprint)

@@ -30,6 +30,18 @@ fn default_port() -> u16 {
 
 pub type Map = BTreeMap<String, Entry>;
 
+/// The key a trust-on-first-use entry is stored under: the address itself,
+/// `ip:port`. A name is for humans; an address nobody named yet still needs
+/// somewhere to keep the fingerprint it announced.
+pub fn address_key(addr: IpAddr, port: u16) -> String {
+    // Bracket an IPv6 address, or `::1:53317` would not parse back.
+    if addr.is_ipv6() {
+        format!("[{addr}]:{port}")
+    } else {
+        format!("{addr}:{port}")
+    }
+}
+
 pub fn path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("ZAPSEND_CONFIG") {
         return Ok(PathBuf::from(p));
@@ -193,6 +205,18 @@ pub fn forget(name: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_key_is_ip_colon_port() {
+        assert_eq!(
+            address_key("127.0.0.1".parse().unwrap(), 53400),
+            "127.0.0.1:53400"
+        );
+        assert_eq!(
+            address_key("::1".parse().unwrap(), 53317),
+            "[::1]:53317"
+        );
+    }
+
     use super::*;
 
     fn temp(name: &str) -> PathBuf {
