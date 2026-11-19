@@ -440,6 +440,17 @@ the peer with **different** contents is reported as a conflict and left alone �
 LocalSend's upload has no overwrite, so the alternative would be a silent second
 copy — and the exit code is non-zero so cron notices.
 
+```sh
+zapsend sync ~/docs --to nas --replace   # overwrite the files that changed
+```
+
+`--replace` is the deliberate exception: it sends the conflicting files with a
+zapsend-only `replace` flag, the receiver verifies the new bytes' SHA-256
+before touching the old file, moves the old file aside, and only deletes it
+once the new one is in place. Sync then re-reads the manifest and checks every
+replaced file's hash against the local copy. Without the flag, conflicts stay
+conflicts.
+
 ### Receive files
 
 ```sh
@@ -559,17 +570,26 @@ own receiver by guessing wrong five times.
 - [x] PIN lockout scoped per address instead of globally
 - [x] Download API — `receive --share DIR` plus `zapsend pull`
 - [x] `/24` unicast sweep for networks that block multicast (covers the mDNS case)
+- [x] `--ip` without a fingerprint is refused; `--tofu` trusts on first sight and saves it
+- [x] `sync --replace` overwrites changed files, hash-verified before and after
 
 ## Known limitations
 
-- **`--ip` without `--fingerprint` is unverified.** Sending to a raw address
-  skips discovery, so there is no fingerprint to pin against; zapsend warns
-  and accepts whatever certificate answers. Pass `--fingerprint` (get it from
-  `zapsend discover`) to close that hole. Discovery-based sends are always pinned.
+- **`--ip` without `--fingerprint` is refused.** Sending to a raw address
+  skips discovery, so there is no fingerprint to pin against; zapsend refuses
+  instead of sending unverified. Pass `--fingerprint` (get it from
+  `zapsend discover`), trust the machine once (`zapsend trust NAME --ip ADDR`,
+  then `--to NAME`), or `--tofu` to trust on first sight and save the
+  fingerprint for next time. A peer that serves plain HTTP has no certificate
+  to pin and is reported, not refused. Discovery-based sends are always pinned.
 - Files are hashed (SHA-256) before upload, which costs an extra read pass.
-- **`sync` cannot replace a file.** LocalSend's upload has no overwrite, so a
-  file that exists on the peer with different bytes is reported as a conflict
-  and the run exits non-zero instead of adding a second copy.
+- **`sync` cannot replace a file — unless you ask it to.** LocalSend's upload
+  has no overwrite, so a file that exists on the peer with different bytes is
+  reported as a conflict and the run exits non-zero instead of adding a second
+  copy. With `--replace`, sync overwrites exactly those files: the new bytes
+  are hash-verified before the old file is touched, the old file is moved
+  aside first and only deleted once the new one is in place, and sync re-reads
+  the manifest afterwards to confirm the replacement landed.
 - **`sync` needs a zapsend receiver.** It asks `/api/zapsend/v1/manifest`, an
   endpoint outside the LocalSend spec; against a plain LocalSend app it refuses
   with that explanation rather than re-sending everything.

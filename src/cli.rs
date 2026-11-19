@@ -100,6 +100,13 @@ pub enum Command {
         #[arg(long)]
         fingerprint: Option<String>,
 
+        /// Trust this address on first sight: take the fingerprint it announces
+        /// and save it, so the next command verifies against it. Only on a
+        /// network you trust — the first connection is exactly when an
+        /// impostor could answer instead of the real machine.
+        #[arg(long)]
+        tofu: bool,
+
         /// PIN required by the receiving device, if it has one
         #[arg(long)]
         pin: Option<String>,
@@ -154,6 +161,13 @@ pub enum Command {
         /// Pin the peer's certificate fingerprint (64 hex chars)
         #[arg(long)]
         fingerprint: Option<String>,
+
+        /// Trust this address on first sight: take the fingerprint it announces
+        /// and save it, so the next command verifies against it. Only on a
+        /// network you trust — the first connection is exactly when an
+        /// impostor could answer instead of the real machine.
+        #[arg(long)]
+        tofu: bool,
 
         /// PIN the sharing device requires
         #[arg(long)]
@@ -212,6 +226,13 @@ pub enum Command {
         #[arg(long)]
         fingerprint: Option<String>,
 
+        /// Trust this address on first sight: take the fingerprint it announces
+        /// and save it, so the next command verifies against it. Only on a
+        /// network you trust — the first connection is exactly when an
+        /// impostor could answer instead of the real machine.
+        #[arg(long)]
+        tofu: bool,
+
         /// PIN the peer asks for
         #[arg(long)]
         pin: Option<String>,
@@ -219,6 +240,13 @@ pub enum Command {
         /// Say what would be sent and send nothing
         #[arg(long)]
         dry_run: bool,
+
+        /// Replace files the peer already holds with different content.
+        /// Without it those are conflicts and the run fails. The new bytes
+        /// are hash-verified before the old file is touched, and the old
+        /// file is only deleted once the new one is in place.
+        #[arg(long)]
+        replace: bool,
 
         /// Attempts per upload before giving up on it
         #[arg(long, default_value_t = 3)]
@@ -246,6 +274,13 @@ pub enum Command {
         /// Pin the peer's certificate fingerprint (64 hex chars)
         #[arg(long)]
         fingerprint: Option<String>,
+
+        /// Trust this address on first sight: take the fingerprint it announces
+        /// and save it, so the next command verifies against it. Only on a
+        /// network you trust — the first connection is exactly when an
+        /// impostor could answer instead of the real machine.
+        #[arg(long)]
+        tofu: bool,
 
         /// PIN required by the receiving device, if it has one
         #[arg(long)]

@@ -208,6 +208,7 @@ async fn run() -> Result<()> {
             to,
             ip,
             fingerprint,
+            tofu,
             pin,
             scan,
             retry,
@@ -219,6 +220,7 @@ async fn run() -> Result<()> {
                 to,
                 ip,
                 fingerprint,
+                tofu,
                 pin,
                 scan,
                 retry,
@@ -235,6 +237,7 @@ async fn run() -> Result<()> {
             to,
             ip,
             fingerprint,
+            tofu,
             pin,
             dir,
             file,
@@ -248,6 +251,7 @@ async fn run() -> Result<()> {
                     to,
                     ip,
                     fingerprint,
+                    tofu,
                     pin,
                     dir,
                     file,
@@ -262,8 +266,10 @@ async fn run() -> Result<()> {
             to,
             ip,
             fingerprint,
+            tofu,
             pin,
             dry_run,
+            replace,
             retries,
         } => {
             sync::run(
@@ -274,8 +280,10 @@ async fn run() -> Result<()> {
                     to,
                     ip,
                     fingerprint,
+                    tofu,
                     pin,
                     dry_run,
+                    replace,
                     retries,
                 },
             )
@@ -292,6 +300,7 @@ async fn run() -> Result<()> {
             to,
             ip,
             fingerprint,
+            tofu,
             pin,
             interval,
             settle,
@@ -306,6 +315,7 @@ async fn run() -> Result<()> {
                     to,
                     ip,
                     fingerprint,
+                    tofu,
                     pin,
                     interval,
                     settle,
@@ -500,6 +510,7 @@ pub(crate) fn collect_uploads(paths: &[PathBuf]) -> Result<Vec<client::Upload>> 
             out.push(client::Upload {
                 path: path.clone(),
                 name,
+                replace: false,
             });
         }
     }
@@ -523,10 +534,139 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<client::Upload>) -> Result<(
         if path.is_dir() {
             walk_dir(&path, &remote, out)?;
         } else {
-            out.push(client::Upload { path, name: remote });
+            out.push(client::Upload {
+                path,
+                name: remote,
+                replace: false,
+            });
         }
     }
     Ok(())
+}
+
+/// Resolve a `--ip` target into a peer whose certificate we can pin, or refuse.
+///
+/// `--ip` skips discovery, so there is no announcement to pin against. The
+/// three ways through, in order:
+/// * `--fingerprint` — pin exactly that certificate.
+/// * a fingerprint saved earlier under this address (by `trust` under a name,
+///   or by an earlier `--tofu` under the address itself).
+/// * `--tofu` — trust on first sight: take the fingerprint the peer announces
+///   over /info and save it under the address, so the next command verifies
+///   against it. Only on a network you trust.
+/// A peer that serves plain HTTP has no certificate to pin; that is reported,
+/// not refused — the peer itself chose unencrypted traffic.
+pub(crate) async fn resolve_ip_peer(
+    raw: &str,
+    fingerprint: Option<&str>,
+    tofu: bool,
+    verb: &str,
+) -> Result<Peer> {
+    let (addr, target_port) = parse_target(raw)?;
+    let key = hosts::address_key(addr, target_port);
+    let mut peer = Peer {
+        info: DeviceInfo {
+            zapsend_resume: false,
+            alias: raw.to_string(),
+            version: PROTOCOL_VERSION.to_string(),
+            device_model: None,
+            device_type: None,
+            fingerprint: String::new(),
+            port: target_port,
+            protocol: "https".to_string(),
+            download: false,
+        },
+        ip: addr,
+    };
+    if let Some(given) = fingerprint {
+        if given.len() != 64 || !given.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("a fingerprint is 64 hex characters, got {}", given.len());
+        }
+        peer.info.fingerprint = given.to_ascii_lowercase();
+        return Ok(peer);
+    }
+    if let Some(known) = hosts::peer(&key).await? {
+        return Ok(known);
+    }
+    if !tofu {
+        bail!("{}", unverified_ip_refusal(addr, target_port, verb));
+    }
+    // Trust on first sight: ask who is there over an unverified connection,
+    // take the fingerprint it announces, and save it before any file moves.
+    let info = client::fetch_info(&peer).await.with_context(|| {
+        format!("cannot reach {raw}: pass --fingerprint to save it without a check")
+    })?;
+    if info.protocol.eq_ignore_ascii_case("http") {
+        peer.info.protocol = info.protocol.clone();
+        peer.info.zapsend_resume = info.zapsend_resume;
+        peer.info.download = info.download;
+        if !info.alias.is_empty() {
+            peer.info.alias = info.alias;
+        }
+        eprintln!(
+            "! {raw} serves plain HTTP — there is no certificate to pin, traffic is unencrypted"
+        );
+        return Ok(peer);
+    }
+    if info.fingerprint.len() != 64 {
+        bail!("{raw} did not announce a fingerprint, nothing to pin — pass --fingerprint to save one without a check");
+    }
+    let stored = info.fingerprint.to_ascii_lowercase();
+    hosts::remember(&key, &addr.to_string(), target_port, Some(stored.clone()), None)?;
+    eprintln!(
+        "! trusting {raw} on first sight — fingerprint {} saved; compare it with what the machine prints when it starts",
+        identity::short_fingerprint(&stored)
+    );
+    peer.info.fingerprint = stored;
+    peer.info.zapsend_resume = info.zapsend_resume;
+    peer.info.download = info.download;
+    peer.info.protocol = info.protocol;
+    if !info.alias.is_empty() {
+        peer.info.alias = info.alias;
+    }
+    Ok(peer)
+}
+
+/// The error for a `--ip` target nobody has verified yet. It has to name the
+/// fix, not just the problem: a user who typed `--ip` on a trusted home
+/// network is one command away from a verified connection, and the error
+/// should be that command.
+fn unverified_ip_refusal(addr: IpAddr, port: u16, verb: &str) -> String {
+    format!(
+        "refusing to {verb} {addr}:{port} without a verified certificate fingerprint.
+
+The peer's certificate cannot be checked against anything you have seen before, so a machine on this network could pretend to be it. Fix it one of these ways:
+  zapsend trust NAME --ip {addr}:{port}   # remember it once, then use --to NAME
+  add --fingerprint <64 hex chars from `zapsend discover`>
+  add --tofu   # trust on first sight, save the fingerprint for next time"
+    )
+}
+
+/// Refuse to use a peer whose certificate cannot be pinned, unless it serves
+/// plain HTTP — then there is no certificate at all, and the warning says
+/// so. Discovery and `trust` always supply a fingerprint; an empty one here
+/// means a hand-edited hosts entry, or a `--ip` that slipped past
+/// `resolve_ip_peer`.
+pub(crate) fn require_verified(peer: &Peer, fix: &str) -> Result<()> {
+    if !peer.info.fingerprint.is_empty() {
+        return Ok(());
+    }
+    if peer.info.protocol.eq_ignore_ascii_case("http") {
+        eprintln!(
+            "! {} serves plain HTTP — there is no certificate to pin, traffic is unencrypted",
+            peer.info.alias
+        );
+        return Ok(());
+    }
+    bail!(
+        "refusing to talk to {} ({}:{}) without a verified certificate fingerprint.
+
+The peer's certificate cannot be checked against anything you have seen before, so a machine on this network could pretend to be it.
+{fix}",
+        peer.info.alias,
+        peer.ip,
+        peer.info.port
+    )
 }
 
 /// Accept `1.2.3.4` or `1.2.3.4:53400`.
@@ -557,6 +697,7 @@ async fn send(
     to: Option<String>,
     ip: Option<String>,
     fingerprint: Option<String>,
+    tofu: bool,
     pin: Option<String>,
     scan_secs: u64,
     retries: u32,
@@ -588,22 +729,9 @@ async fn send(
     // work even while another instance owns the port.
     let (stack, peer) = match ip {
         Some(raw) => {
-            let (addr, target_port) = parse_target(&raw)?;
             let stack = local_only(alias, port)?;
-            let mut peer = Peer {
-                info: DeviceInfo {
-                    zapsend_resume: false,
-                    alias: raw.clone(),
-                    version: PROTOCOL_VERSION.to_string(),
-                    device_model: None,
-                    device_type: None,
-                    fingerprint: fingerprint.clone().unwrap_or_default(),
-                    port: target_port,
-                    protocol: "https".to_string(),
-                    download: false,
-                },
-                ip: addr,
-            };
+            let mut peer =
+                resolve_ip_peer(&raw, fingerprint.as_deref(), tofu, "send files to").await?;
             // Ask who is actually there before sending: that is how we learn
             // whether it can resume a broken upload, and which scheme it serves.
             // A peer that does not answer /info is not a reason to give up.
@@ -673,9 +801,11 @@ async fn send(
         peer.ip,
         peer.info.port
     );
-    if peer.info.fingerprint.is_empty() {
-        eprintln!("! unverified peer: pass --fingerprint to pin its certificate");
-    } else {
+    require_verified(
+        &peer,
+        "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+    )?;
+    if !peer.info.fingerprint.is_empty() {
         eprintln!(
             "  pinned to {}",
             identity::short_fingerprint(&peer.info.fingerprint)
@@ -1100,5 +1230,20 @@ async fn receive(
             let _ = discovery::announce(sock, &stack.me).await;
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refusal_names_the_address_and_all_three_fixes() {
+        let msg = unverified_ip_refusal("192.168.1.42".parse().unwrap(), 53317, "send files to");
+        assert!(msg.contains("192.168.1.42:53317"), "{msg}");
+        assert!(msg.contains("send files to"), "{msg}");
+        assert!(msg.contains("zapsend trust NAME --ip 192.168.1.42:53317"), "{msg}");
+        assert!(msg.contains("--fingerprint"), "{msg}");
+        assert!(msg.contains("--tofu"), "{msg}");
     }
 }

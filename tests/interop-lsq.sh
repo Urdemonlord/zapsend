@@ -25,6 +25,7 @@ if [ "$WANTV" != "$HAVEV" ]; then
 fi
 
 T=$(mktemp -d)
+export ZAPSEND_CONFIG="$T/hosts.json"
 PIDS=()
 pass=0
 fail=0
@@ -49,7 +50,7 @@ echo "▸ A. zapsend send → lsq receive (they are the receiver)"
 "$LSQ" --ephemeral --alias lsq-recv --port 53320 receive --dest "$T/a" --yes > "$T/a.log" 2>&1 &
 PIDS+=($!)
 sleep 3
-"$Z" send "$T/in/payload.bin" "$T/in/note.txt" --ip 127.0.0.1:53320 --json > "$T/a.json" 2>/dev/null
+"$Z" send "$T/in/payload.bin" "$T/in/note.txt" --ip 127.0.0.1:53320 --tofu --json > "$T/a.json" 2>/dev/null
 check 'exit code' "$?" '0'
 check 'the peer took both files' "$(jq -r '.ok' "$T/a.json")" 'true'
 check 'payload arrived intact' "$(sha256sum "$T/a/payload.bin" 2>/dev/null | cut -d' ' -f1)" "$sha_in_bin"
@@ -69,7 +70,7 @@ echo "▸ C. zapsend pull ← lsq share (their Download API, over plain HTTP)"
 "$LSQ" --ephemeral --alias lsq-share --port 53330 share "$T/in/payload.bin" "$T/in/note.txt" > "$T/c.log" 2>&1 &
 PIDS+=($!)
 sleep 3
-"$Z" pull --ip 127.0.0.1:53330 --dir "$T/c" --json > "$T/c.json" 2>/dev/null
+"$Z" pull --ip 127.0.0.1:53330 --tofu --dir "$T/c" --json > "$T/c.json" 2>/dev/null
 check 'exit code' "$?" '0'
 check 'both files pulled' "$(jq -r '.count' "$T/c.json")" '2'
 check 'payload arrived intact' "$(sha256sum "$T/c/payload.bin" 2>/dev/null | cut -d' ' -f1)" "$sha_in_bin"

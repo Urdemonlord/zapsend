@@ -18,6 +18,7 @@ pub struct Options {
     pub to: Option<String>,
     pub ip: Option<String>,
     pub fingerprint: Option<String>,
+    pub tofu: bool,
     pub pin: Option<String>,
     pub interval: u64,
     pub settle: Option<u64>,
@@ -380,21 +381,8 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
 
     let peer = match &opts.ip {
         Some(raw) => {
-            let (addr, target_port) = crate::parse_target(raw)?;
-            Peer {
-                info: crate::protocol::DeviceInfo {
-            zapsend_resume: false,
-                    alias: raw.clone(),
-                    version: crate::protocol::PROTOCOL_VERSION.to_string(),
-                    device_model: None,
-                    device_type: None,
-                    fingerprint: opts.fingerprint.clone().unwrap_or_default(),
-                    port: target_port,
-                    protocol: "https".to_string(),
-                    download: false,
-                },
-                ip: addr,
-            }
+            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "send files to")
+                .await?
         }
         None => {
             // A name in the hosts file needs no discovery at all.
@@ -433,9 +421,10 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
         }
     }
 
-    if peer.info.fingerprint.is_empty() {
-        eprintln!("! unverified peer: pass --fingerprint to pin its certificate");
-    }
+    crate::require_verified(
+        &peer,
+        "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+    )?;
     println!(
         "  target      \"{}\" {}:{}",
         peer.info.alias, peer.ip, peer.info.port

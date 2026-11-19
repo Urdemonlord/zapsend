@@ -125,6 +125,7 @@ struct Pending {
     path: PathBuf,
     name: String,
     size: u64,
+    replace: bool,
 }
 
 /// Send, retrying once over the other scheme when the peer refuses our TLS.
@@ -138,6 +139,10 @@ struct Pending {
 pub struct Upload {
     pub path: PathBuf,
     pub name: String,
+    /// Replace the file the receiver already holds (sync --replace only).
+    /// Plain `send` never sets this: the receiver would otherwise land the
+    /// file as `name (1).ext`, which is the safe default.
+    pub replace: bool,
 }
 
 /// Read a peer's own `info` document, the way `doctor` proves a device is
@@ -709,6 +714,7 @@ async fn send_files_over(
             path: upload.path.clone(),
             name: upload.name.clone(),
             size: meta.len(),
+            replace: upload.replace,
         });
     }
 
@@ -960,6 +966,7 @@ fn file_meta(item: &Pending, sha: String) -> FileMeta {
         size: item.size,
         file_type: Some(mime_for(&item.name)),
         sha256: Some(sha),
+        replace: item.replace,
     }
 }
 

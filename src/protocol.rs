@@ -129,6 +129,10 @@ pub fn guess_mime(name: &str) -> String {
     mime.to_string()
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Metadata for one file inside a transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,6 +146,13 @@ pub struct FileMeta {
     pub file_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Zapsend extension, not part of the LocalSend spec: replace the file the
+    /// receiver already holds instead of landing as `name (1).ext`. Only ever
+    /// sent by `sync --replace`, and only to a peer that answered the zapsend
+    /// manifest endpoint, so a plain LocalSend receiver never sees it set.
+    /// Unknown fields are ignored by other implementations.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub replace: bool,
 }
 
 /// Body of `POST /prepare-upload`.
@@ -194,6 +205,7 @@ mod tests {
             size: 1,
             file_type: None,
             sha256: None,
+            replace: false,
         };
         let json = serde_json::to_string(&meta).unwrap();
         assert!(

@@ -37,6 +37,7 @@ if [[ ! -x "$BIN" ]]; then
 fi
 
 WORK="$(mktemp -d)"
+export ZAPSEND_CONFIG="$WORK/hosts.json"
 RECV_PID=""
 VAULT_PID=""
 cleanup() {
@@ -115,6 +116,35 @@ if [[ "$FAILED" -ne 0 ]]; then
     exit 1
 fi
 
+step "refusing an unverified --ip send"
+# Capture first, then grep: see the wrong-fingerprint step for why.
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$PORT" >"$WORK/no_fp.log" 2>&1 || true
+if grep -q "without a verified certificate fingerprint" "$WORK/no_fp.log"; then
+    ok "bare --ip was refused, with the fix in the message"
+else
+    warn "bare --ip was NOT refused"
+    cat "$WORK/no_fp.log"
+    exit 1
+fi
+
+step "trust on first use saves the fingerprint"
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$PORT" --tofu >"$WORK/tofu.log" 2>&1
+if grep -q "127.0.0.1:$PORT" "$WORK/hosts.json" 2>/dev/null; then
+    ok "fingerprint saved under 127.0.0.1:$PORT"
+else
+    warn "--tofu did not save the fingerprint"
+    cat "$WORK/tofu.log" "$WORK/hosts.json" 2>/dev/null
+    exit 1
+fi
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$PORT" >"$WORK/tofu2.log" 2>&1
+if grep -q "pinned to" "$WORK/tofu2.log"; then
+    ok "second send verified against the saved fingerprint"
+else
+    warn "second send was not pinned"
+    cat "$WORK/tofu2.log"
+    exit 1
+fi
+
 step "rejecting a wrong fingerprint"
 # Capture first, then grep: `| grep -q` closes the pipe early, the sender dies
 # of SIGPIPE, and `set -o pipefail` would report failure even on a match.
@@ -137,8 +167,9 @@ mkdir -p "$WORK/vault"
 "$BIN" receive --port "$VAULT_PORT" --alias vault --pin 424242 --dir "$WORK/vault" >"$WORK/vault.log" 2>&1 &
 VAULT_PID=$!
 sleep 1.5
+VAULT_FP="$(grep -o 'fingerprint [0-9a-f]*' "$WORK/vault.log" | awk '{print $2}' | head -1)"
 
-"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --pin 000000 >"$WORK/pin_bad.log" 2>&1 || true
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --fingerprint "$VAULT_FP" --pin 000000 >"$WORK/pin_bad.log" 2>&1 || true
 if grep -q "rejected the PIN" "$WORK/pin_bad.log"; then
     ok "wrong PIN refused"
 else
@@ -147,7 +178,7 @@ else
     exit 1
 fi
 
-"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --pin 424242 >"$WORK/pin_ok.log" 2>&1 || true
+"$BIN" send "$WORK/notes.pdf" --ip "127.0.0.1:$VAULT_PORT" --fingerprint "$VAULT_FP" --pin 424242 >"$WORK/pin_ok.log" 2>&1 || true
 if [[ -f "$WORK/vault/notes.pdf" ]]; then
     ok "correct PIN accepted"
 else
