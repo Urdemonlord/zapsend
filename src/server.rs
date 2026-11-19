@@ -1015,7 +1015,7 @@ async fn upload(
         );
     }
 
-    let file = match tokio::fs::OpenOptions::new()
+    let mut file = match tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
@@ -1038,6 +1038,19 @@ async fn upload(
             format!("cannot size the partial file: {e}"),
         );
     }
+    // The open starts the cursor at 0 and `set_len` does not move it: without
+    // this seek a resumed upload overwrites the stored prefix from position
+    // 0 instead of appending at `offset`. The transfer still completed --
+    // the sender's prefix-hash check caught the splice and restarted from
+    // zero -- but every kept byte was re-sent. (Found by killing a 1 GiB
+    // send mid-transfer: the partial grew to exactly the tail length
+    // written from 0, and the next attempt's prefix hash mismatched.)
+    if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot seek the partial file: {e}"),
+        );
+    }
 
     let pb = Arc::new(ProgressBar::new(meta.size));
     if let Ok(style) = ProgressStyle::with_template("{msg} [{bar:30}] {bytes}/{total_bytes}") {
@@ -1047,16 +1060,28 @@ async fn upload(
     pb.set_position(offset);
 
     let bar = pb.clone();
+    // Hash the bytes as they arrive, so a fresh upload (offset 0) is verified
+    // without a second full read of the file afterwards. A resumed upload
+    // (offset > 0) still uses the post-upload re-read below: the stream only
+    // carries the tail, not the prefix already on disk.
+    let stream_hasher = Arc::new(std::sync::Mutex::new(Sha256::new()));
+    let hasher = stream_hasher.clone();
     let stream = body.into_data_stream().map(move |chunk| {
         if let Ok(ref c) = chunk {
             bar.inc(c.len() as u64);
+            if let Ok(mut h) = hasher.lock() {
+                h.update(c);
+            }
         }
         chunk
     });
 
     let mut reader = StreamReader::new(stream.map_err(std::io::Error::other));
-    let mut out = tokio::io::BufWriter::new(file);
-    let result = tokio::io::copy(&mut reader, &mut out).await;
+    let mut out = tokio::io::BufWriter::with_capacity(256 * 1024, file);
+    // copy_buf (the AsyncBufRead variant) forwards the stream's own
+    // chunks with no extra allocation, so the read size is the chunk
+    // size the sender used — not tokio::io::copy's 8 KiB buffer.
+    let result = tokio::io::copy_buf(&mut reader, &mut out).await;
     pb.finish_and_clear();
 
     if let Err(e) = result {
@@ -1092,11 +1117,22 @@ async fn upload(
     }
 
     if let Some(expected) = meta.sha256.clone() {
-        let probe = part.clone();
-        let hashed = tokio::task::spawn_blocking(move || stored_prefix(&probe)).await;
-        match hashed {
-            Ok(Ok((_, got))) if got.eq_ignore_ascii_case(&expected) => {}
-            Ok(Ok((_, got))) => {
+        // Fresh upload: the hasher above already saw every byte, so compare
+        // its digest — no second read of the file. Resumed upload: the stream
+        // only carried the tail, so fall back to hashing the stored file.
+        let got = if offset == 0 {
+            let h = stream_hasher.lock().expect("stream hasher poisoned").clone();
+            Some(hex::encode(h.finalize()))
+        } else {
+            let probe = part.clone();
+            match tokio::task::spawn_blocking(move || stored_prefix(&probe)).await {
+                Ok(Ok((_, got))) => Some(got),
+                _ => None,
+            }
+        };
+        match got {
+            Some(got) if got.eq_ignore_ascii_case(&expected) => {}
+            Some(got) => {
                 let _ = tokio::fs::remove_file(&part).await;
                 eprintln!("✗ checksum mismatch for {} — discarded", meta.file_name);
                 // The spec asks for 422 here, not 500: the request was fine,
@@ -1106,11 +1142,11 @@ async fn upload(
                     format!("checksum mismatch: sender said {expected}, we computed {got}"),
                 );
             }
-            _ => {
+            None => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "cannot verify the received file".to_string(),
-                )
+                );
             }
         }
     }

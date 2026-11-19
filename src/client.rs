@@ -119,6 +119,7 @@ fn unpinned_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+#[derive(Clone)]
 struct Pending {
     id: String,
     path: PathBuf,
@@ -605,7 +606,6 @@ async fn upload_once(
     offset: u64,
     pb: &Arc<ProgressBar>,
     overall: &ProgressBar,
-    finished: u64,
 ) -> Result<()> {
     let token = prepared
         .files
@@ -624,11 +624,17 @@ async fn upload_once(
         tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(offset)).await?;
     }
     pb.set_position(offset);
-    overall.set_position(finished + offset);
+    // No overall.set_position here: with concurrent uploads the overall
+    // bar is advanced only by the per-chunk inc() calls, which are
+    // atomic. A set_position from one task could move it backwards.
 
     let bar = pb.clone();
     let done = overall.clone();
-    let stream = ReaderStream::new(file).map(move |chunk| {
+    // 8 KiB chunks (ReaderStream's default) meant a TLS record, a hyper
+    // wakeup and a progress-bar bump per 8 KiB. 256 KiB keeps the same
+    // bytes on the wire with ~32x fewer chunks; the protocol never sees
+    // a chunk size, so interop is unaffected.
+    let stream = ReaderStream::with_capacity(file, 256 * 1024).map(move |chunk| {
         if let Ok(ref c) = chunk {
             bar.inc(c.len() as u64);
             done.inc(c.len() as u64);
@@ -710,26 +716,60 @@ async fn send_files_over(
     spinner.set_message("hashing…");
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
+    // The sender hash is a full extra read pass, so it is made cheap two
+    // ways: a cache keyed by (path, size, mtime) for files sent before, and
+    // hashing the cache misses concurrently instead of one file at a time.
+    // The hash itself is still SHA-256: the protocol and the receiver's
+    // resume bookkeeping both depend on it.
+    let mut cache = crate::hashcache::HashCache::load();
     let mut files = HashMap::new();
+    let mut to_hash: Vec<&Pending> = Vec::new();
     for item in &pending {
-        let path = item.path.clone();
-        let sha = tokio::task::spawn_blocking(move || sha256_file(&path)).await??;
-        files.insert(
-            item.id.clone(),
-            FileMeta {
-                id: item.id.clone(),
-                file_name: item.name.clone(),
-                size: item.size,
-                file_type: Some(mime_for(&item.name)),
-                sha256: Some(sha),
-            },
-        );
+        match cache.lookup(&item.path, item.size) {
+            Some(sha) => {
+                files.insert(item.id.clone(), file_meta(item, sha));
+            }
+            None => to_hash.push(item),
+        }
+    }
+    if !to_hash.is_empty() {
+        // Bound the concurrency: hashing is CPU-bound and this box has few
+        // cores, but small files also pay open/read syscalls, so a little
+        // oversubscription keeps the pipe full.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+        let mut set = tokio::task::JoinSet::new();
+        for item in &to_hash {
+            let path = item.path.clone();
+            let id = item.id.clone();
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("hash semaphore closed");
+            set.spawn(async move {
+                let _permit = permit;
+                let sha = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || sha256_file(&path)
+                })
+                .await;
+                (id, path, sha)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            let (id, path, sha) = joined?;
+            let sha = sha??;
+            let item = pending.iter().find(|p| p.id == id).expect("pending id");
+            cache.store(&path, item.size, &sha);
+            files.insert(id, file_meta(item, sha));
+        }
+        cache.save();
     }
     spinner.finish_and_clear();
 
     let http = peer_client(peer)?;
     let base = peer.base_url();
-    let mut prepared = prepare_upload(&http, &base, me, pin, files.clone()).await?;
+    let prepared = prepare_upload(&http, &base, me, pin, files.clone()).await?;
 
     let total: u64 = pending.iter().map(|p| p.size).sum();
     let overall = ProgressBar::new(total);
@@ -743,64 +783,143 @@ async fn send_files_over(
     // Only zapsend receivers advertise this. Real LocalSend peers get the plain
     // upload, and a retry simply starts the file again.
     let can_resume = peer.info.zapsend_resume;
-    let mut finished = 0u64;
 
+    // Files go up concurrently (bounded): with one file at a time, a send of
+    // many small files pays a full resume/upload round trip per file in
+    // series. Each file keeps its own retry loop, progress bar and token.
+    // The prepare session is shared, and a file whose session went away
+    // re-prepares for everybody — the server keeps the old session valid,
+    // so files already in flight are unaffected.
+    let shared = Arc::new(tokio::sync::Mutex::new(Arc::new(prepared)));
+    let files = Arc::new(files);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let mut set = tokio::task::JoinSet::new();
     for item in &pending {
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-
-            // Ask what the receiver already has, on every attempt — that is also
-            // what makes a *new* `send` pick up bytes an earlier run left behind.
-            let offset = if can_resume {
-                let token = prepared.files.get(&item.id).map(|t| t.as_str()).unwrap_or("");
-                let url = format!(
-                    "{base}{API}/resume?sessionId={}&fileId={}&token={}",
-                    prepared.session_id, item.id, token
-                );
-                stored_offset(&http, &url, item).await
-            } else {
-                0
-            };
-            if offset > 0 {
-                eprintln!(
-                    "↻ {} — receiver already has {}, resuming",
-                    item.name,
-                    crate::human_bytes(offset)
-                );
-            }
-
-            let pb = Arc::new(ProgressBar::new(item.size));
-            if let Ok(style) =
-                ProgressStyle::with_template("{msg} [{bar:24}] {bytes}/{total_bytes} ({eta})")
-            {
-                pb.set_style(style.progress_chars("=> "));
-            }
-            pb.set_message(item.name.clone());
-
-            match upload_once(&http, &base, &prepared, item, offset, &pb, &overall, finished).await {
-                Ok(()) => {
-                    finished += item.size;
-                    break;
+        let item = item.clone();
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("upload semaphore closed");
+        let http = http.clone();
+        let base = base.to_string();
+        let me = me.clone();
+        let pin = pin.map(str::to_string);
+        let shared = shared.clone();
+        let files = files.clone();
+        let overall = overall.clone();
+        set.spawn(async move {
+            let _permit = permit;
+            upload_with_retries(
+                &http,
+                &base,
+                &shared,
+                &files,
+                &item,
+                &me,
+                pin.as_deref(),
+                retries,
+                can_resume,
+                &overall,
+            )
+            .await
+        });
+    }
+    let mut first_err: Option<anyhow::Error> = None;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
                 }
-                Err(e) => {
-                    if attempt > retries {
-                        bail!("{} failed after {attempt} attempt(s): {e:#}", item.name);
-                    }
-                    if e.downcast_ref::<SessionGone>().is_some() {
-                        eprintln!("! receiver restarted — preparing the transfer again");
-                        prepared = prepare_upload(&http, &base, me, pin, files.clone()).await?;
-                    } else {
-                        eprintln!("! {} interrupted: {e:#}", item.name);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(anyhow::Error::new(e));
                 }
             }
         }
     }
-
     overall.finish_and_clear();
+    if let Some(e) = first_err {
+        return Err(e);
+    }
     Ok(())
+}
+
+/// Upload one file, retrying dropped connections. A receiver that forgot the
+/// session (it restarted, or the session aged out) triggers a fresh
+/// `prepare-upload` for everybody; the server keeps the old session valid,
+/// so files already in flight are unaffected. Runs concurrently with the
+/// other files of the same send.
+#[allow(clippy::too_many_arguments)]
+async fn upload_with_retries(
+    http: &reqwest::Client,
+    base: &str,
+    prepared: &Arc<tokio::sync::Mutex<Arc<PrepareUploadResponse>>>,
+    files: &Arc<HashMap<String, FileMeta>>,
+    item: &Pending,
+    me: &DeviceInfo,
+    pin: Option<&str>,
+    retries: u32,
+    can_resume: bool,
+    overall: &ProgressBar,
+) -> Result<()> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+
+        // The current session: another file may have re-prepared while this
+        // one was waiting, which is fine — the token for this file is read
+        // from whichever session is current.
+        let current = prepared.lock().await.clone();
+
+        // Ask what the receiver already has, on every attempt — that is also
+        // what makes a *new* `send` pick up bytes an earlier run left behind.
+        let offset = if can_resume {
+            let token = current.files.get(&item.id).map(|t| t.as_str()).unwrap_or("");
+            let url = format!(
+                "{base}{API}/resume?sessionId={}&fileId={}&token={}",
+                current.session_id, item.id, token
+            );
+            stored_offset(http, &url, item).await
+        } else {
+            0
+        };
+        if offset > 0 {
+            eprintln!(
+                "↻ {} — receiver already has {}, resuming",
+                item.name,
+                crate::human_bytes(offset)
+            );
+        }
+
+        let pb = Arc::new(ProgressBar::new(item.size));
+        if let Ok(style) =
+            ProgressStyle::with_template("{msg} [{bar:24}] {bytes}/{total_bytes} ({eta})")
+        {
+            pb.set_style(style.progress_chars("=> "));
+        }
+        pb.set_message(item.name.clone());
+
+        match upload_once(http, base, &current, item, offset, &pb, overall).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt > retries {
+                    bail!("{} failed after {attempt} attempt(s): {e:#}", item.name);
+                }
+                if e.downcast_ref::<SessionGone>().is_some() {
+                    eprintln!("! receiver restarted — preparing the transfer again");
+                    let fresh = prepare_upload(http, base, me, pin, (**files).clone()).await?;
+                    *prepared.lock().await = Arc::new(fresh);
+                } else {
+                    eprintln!("! {} interrupted: {e:#}", item.name);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            }
+        }
+    }
 }
 
 /// `fileType` is mandatory in the receiver's schema — LocalSend's `FileDto`
@@ -832,6 +951,16 @@ fn mime_for(name: &str) -> String {
         _ => "application/octet-stream",
     };
     mime.to_string()
+}
+
+fn file_meta(item: &Pending, sha: String) -> FileMeta {
+    FileMeta {
+        id: item.id.clone(),
+        file_name: item.name.clone(),
+        size: item.size,
+        file_type: Some(mime_for(&item.name)),
+        sha256: Some(sha),
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
