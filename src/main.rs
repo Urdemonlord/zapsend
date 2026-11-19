@@ -3,6 +3,7 @@ mod client;
 mod daemon;
 mod discovery;
 mod doctor;
+mod hashcache;
 mod hosts;
 mod identity;
 mod protocol;
