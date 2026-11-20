@@ -838,9 +838,110 @@ async fn send(
 }
 
 
-/// One command, many peers, one summary. Sequential on purpose: one uplink
-/// shared by parallel uploads is slower for everybody, and a fleet push is
-/// usually logs and artifacts, not a race.
+/// How many hosts a fan-out talks to at once. Four, because it matches the
+/// two bounds already calibrated in `client`: four concurrent file uploads
+/// per send, four concurrent hashes. A fan-out of the usual size (two or
+/// three hosts) runs fully in parallel under it, while a `--to all` list of
+/// dozens still opens at most four TLS sessions at a time instead of one
+/// per host. More would not help on the machines this runs on: one 1 GiB
+/// send already keeps the sender's hashing and TLS busy, so the gain comes
+/// from overlapping the hosts, not from piling more of them on.
+const FANOUT_CONCURRENCY: usize = 4;
+
+/// Run one async job per item with at most `limit` in flight, collecting the
+/// results in input order. One item's outcome never cancels the others: a
+/// job that fails returns its failure as a value, and the caller decides
+/// what that means. A job that panics is a bug, not a peer failure, so it
+/// still fails the whole run.
+async fn run_bounded<T, F, Fut, O>(items: Vec<T>, limit: usize, f: F) -> Result<Vec<O>>
+where
+    T: Send + 'static,
+    F: Fn(T) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = O> + Send + 'static,
+    O: Send + 'static,
+{
+    let n = items.len();
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(limit.max(1)));
+    let f = Arc::new(f);
+    let mut set = tokio::task::JoinSet::new();
+    for (idx, item) in items.into_iter().enumerate() {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("fan-out semaphore closed");
+        let f = f.clone();
+        set.spawn(async move {
+            let _permit = permit;
+            (idx, f(item).await)
+        });
+    }
+    let mut out: Vec<Option<O>> = (0..n).map(|_| None).collect();
+    while let Some(joined) = set.join_next().await {
+        let (idx, value) = joined?;
+        out[idx] = Some(value);
+    }
+    Ok(out
+        .into_iter()
+        .map(|v| v.expect("fan-out task never ran"))
+        .collect())
+}
+
+/// What one host of a fan-out did. The error is a plain string, not the
+/// anyhow error, so the outcome stays `Send` without dragging the error
+/// type through the task boundary.
+struct HostOutcome {
+    name: String,
+    result: Result<Delivered, String>,
+}
+
+/// A host that has the files: what the summary and the JSON report print.
+struct Delivered {
+    alias: String,
+    ip: IpAddr,
+    port: u16,
+    fingerprint: String,
+}
+
+/// Resolve one named host and send it the files. Runs as one job of a
+/// fan-out: a host that is down or unknown fails here, on its own, while the
+/// other jobs keep going.
+async fn send_to_peer(
+    me: &DeviceInfo,
+    uploads: &[client::Upload],
+    name: String,
+    pin: Option<String>,
+    retries: u32,
+) -> HostOutcome {
+    let result = async {
+        let Some(peer) = hosts::peer(&name).await.map_err(|e| e.to_string())? else {
+            // One unknown name must not cost the others their delivery.
+            return Err(format!(
+                "not in the hosts file — `zapsend trust {name} --ip <addr>` first"
+            ));
+        };
+        eprintln!("→ {name} ({}:{})", peer.ip, peer.info.port);
+        client::send_files(&peer, me, uploads, pin.as_deref(), retries)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Delivered {
+            alias: peer.info.alias.clone(),
+            ip: peer.ip,
+            port: peer.info.port,
+            fingerprint: peer.info.fingerprint.clone(),
+        })
+    }
+    .await;
+    HostOutcome { name, result }
+}
+
+/// One command, many peers, one summary. The sends run in parallel, bounded
+/// to `FANOUT_CONCURRENCY` at a time: a sequential fan-out costs the sum of
+/// every host (a 1 GiB push to three hosts measured 28 s against 9 s for one
+/// host alone), while parallel sends overlap the per-host TLS, hashing and
+/// transfer. One host failing still does not cost the others their delivery,
+/// and the summary still names every host in the order given, with a
+/// non-zero exit when any of them failed.
 async fn fan_out(
     alias: &str,
     port: u16,
@@ -856,9 +957,8 @@ async fn fan_out(
         .map(|m| m.len())
         .sum();
     let stack = local_only(alias, port)?;
-    let mut report = Vec::new();
-    let mut failed = 0usize;
-    let mut delivered = 0u64;
+    let me = Arc::new(stack.me.clone());
+    let uploads = Arc::new(uploads);
 
     eprintln!(
         "sending {} file(s), {} to {} peer(s)",
@@ -867,42 +967,52 @@ async fn fan_out(
         names.len()
     );
 
-    for name in names {
-        let Some(peer) = hosts::peer(name).await? else {
-            // One unknown name must not cost the others their delivery.
-            eprintln!("✗ {name}: not in the hosts file — `zapsend trust {name} --ip <addr>` first");
-            report.push(serde_json::json!({
-                "name": name,
-                "ok": false,
-                "error": "not in the hosts file",
-            }));
-            failed += 1;
-            continue;
-        };
-        // Each host keeps its own remembered PIN; --pin overrides all of them.
-        let pin = hosts::resolve_pin(pin.clone(), Some(name));
-        eprintln!("→ {name} ({}:{})", peer.ip, peer.info.port);
-        match client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await {
-            Ok(()) => {
+    // Hash once up front: without this, parallel sends all miss the hash
+    // cache at once and each pays a full hashing pass over the same bytes.
+    // A failure here is not fatal — each send hashes for itself instead.
+    let _ = client::warm_hash_cache(&uploads).await;
+
+    // Each host keeps its own remembered PIN; --pin overrides all of them.
+    let jobs: Vec<(String, Option<String>)> = names
+        .iter()
+        .map(|name| (name.clone(), hosts::resolve_pin(pin.clone(), Some(name))))
+        .collect();
+    let outcomes = run_bounded(jobs, FANOUT_CONCURRENCY, {
+        let me = me.clone();
+        let uploads = uploads.clone();
+        move |(name, pin)| {
+            let me = me.clone();
+            let uploads = uploads.clone();
+            async move { send_to_peer(&me, &uploads, name, pin, retries).await }
+        }
+    })
+    .await?;
+
+    let mut report = Vec::new();
+    let mut failed = 0usize;
+    let mut delivered = 0u64;
+    for outcome in outcomes {
+        match outcome.result {
+            Ok(d) => {
                 delivered += bytes;
-                eprintln!("✓ {name}");
+                eprintln!("✓ {}", outcome.name);
                 report.push(serde_json::json!({
-                    "name": name,
+                    "name": outcome.name,
                     "ok": true,
-                    "alias": peer.info.alias,
-                    "ip": peer.ip.to_string(),
-                    "port": peer.info.port,
-                    "fingerprint": peer.info.fingerprint,
+                    "alias": d.alias,
+                    "ip": d.ip.to_string(),
+                    "port": d.port,
+                    "fingerprint": d.fingerprint,
                     "bytes": bytes,
                 }));
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("✗ {name}: {e}");
+                eprintln!("✗ {}: {e}", outcome.name);
                 report.push(serde_json::json!({
-                    "name": name,
+                    "name": outcome.name,
                     "ok": false,
-                    "error": e.to_string(),
+                    "error": e,
                 }));
             }
         }
@@ -1236,6 +1346,7 @@ async fn receive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn refusal_names_the_address_and_all_three_fixes() {
@@ -1245,5 +1356,82 @@ mod tests {
         assert!(msg.contains("zapsend trust NAME --ip 192.168.1.42:53317"), "{msg}");
         assert!(msg.contains("--fingerprint"), "{msg}");
         assert!(msg.contains("--tofu"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn run_bounded_runs_jobs_in_parallel() {
+        // Three 200 ms jobs under a limit of four finish in one wave, not
+        // three: this is the property the parallel fan-out rests on. The
+        // 500 ms bound leaves room for a loaded machine; sequential would
+        // need 600 ms.
+        let start = std::time::Instant::now();
+        let out = run_bounded(vec![1, 2, 3], 4, |_| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            1
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, vec![1, 1, 1]);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "3x200ms jobs with limit 4 took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_bounded_respects_the_limit() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let out = run_bounded(vec![0; 6], 2, {
+            let live = live.clone();
+            let peak = peak.clone();
+            move |_| {
+                let live = live.clone();
+                let peak = peak.clone();
+                async move {
+                    let n = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(n, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    true
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 6);
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "limit 2 must never run 3 jobs at once"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_bounded_keeps_order_and_isolates_failures() {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let out = run_bounded(vec![0, 1, 2], 3, {
+            let ran = ran.clone();
+            move |i| {
+                let ran = ran.clone();
+                async move {
+                    ran.fetch_add(1, Ordering::SeqCst);
+                    if i == 1 {
+                        Err("boom")
+                    } else {
+                        Ok(i)
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            3,
+            "a failing job must not cancel the others"
+        );
+        assert_eq!(out, vec![Ok(0), Err("boom"), Ok(2)]);
     }
 }
