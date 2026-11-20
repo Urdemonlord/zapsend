@@ -63,6 +63,24 @@ independent implementation: see `tests/interop-lsq.sh`.
 
 ## Install
 
+The fastest way, no Rust toolchain needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Urdemonlord/zapsend/master/install.sh | sh
+```
+
+That downloads the matching release binary for your OS and CPU, verifies
+its SHA-256, and installs it to `~/.local/bin`. Pick a version or a
+different directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Urdemonlord/zapsend/master/install.sh | sh -s -- --version v0.1.0 --dir ~/.local/bin
+```
+
+Prebuilt binaries are also on the [releases page](https://github.com/Urdemonlord/zapsend/releases): Linux x86_64 and aarch64, Windows x86_64, each with a `.sha256` file. macOS has no prebuilt binary yet; use `cargo install` below.
+
+Or install from crates.io:
+
 ```sh
 cargo install zapsend
 ```

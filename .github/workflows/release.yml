@@ -1,0 +1,96 @@
+# Release: push a v* tag and this builds the binaries, then opens a DRAFT
+# GitHub Release with them. The release stays a draft on purpose: the first
+# run is the first real proof of this workflow, so a human reviews the
+# assets and publishes it from the GitHub UI before install.sh can fetch it.
+#
+# Targets shipped (each one must be provable, see below):
+# - x86_64-unknown-linux-gnu: native build + --version smoke test.
+# - aarch64-unknown-linux-gnu: cross-compiled with gcc-aarch64-linux-gnu;
+#   compile-proven only, it is never executed in this workflow.
+# - x86_64-pc-windows-gnu: cross-compiled with mingw, exactly like the
+#   windows job in ci.yml; compile-proven only, same as CI does today.
+# macOS is NOT shipped: there is no macOS job in CI and no macOS linker on a
+# Linux runner, so a macOS binary would be an unproven artifact.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            apt: ''
+            bin: zapsend
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            apt: gcc-aarch64-linux-gnu
+            bin: zapsend
+            archive: tar.gz
+          - target: x86_64-pc-windows-gnu
+            apt: gcc-mingw-w64-x86-64
+            bin: zapsend.exe
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross linker
+        if: matrix.apt != ''
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ${{ matrix.apt }}
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Smoke test (native Linux only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: ./target/${{ matrix.target }}/release/zapsend --version
+      - name: Package
+        run: |
+          set -eu
+          tag="${{ github.ref_name }}"
+          staging="pkg/zapsend-${tag}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$staging/"
+          cp README.md LICENSE "$staging/"
+          cd pkg
+          if [ "${{ matrix.archive }}" = zip ]; then
+            zip -r "zapsend-${tag}-${{ matrix.target }}.zip" "zapsend-${tag}-${{ matrix.target }}"
+          else
+            tar czf "zapsend-${tag}-${{ matrix.target }}.tar.gz" "zapsend-${tag}-${{ matrix.target }}"
+          fi
+          sha256sum "zapsend-${tag}-${{ matrix.target }}.${{ matrix.archive }}" > "zapsend-${tag}-${{ matrix.target }}.${{ matrix.archive }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zapsend-${{ github.ref_name }}-${{ matrix.target }}
+          path: pkg/zapsend-${{ github.ref_name }}-${{ matrix.target }}.*
+
+  release:
+    name: publish draft release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum zapsend-*.tar.gz zapsend-*.zip > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/zapsend-*
+            dist/SHA256SUMS
+          draft: true
+          generate_release_notes: true
