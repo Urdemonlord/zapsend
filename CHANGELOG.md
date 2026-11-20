@@ -4,7 +4,7 @@ All notable changes to zapsend. The format follows Keep a Changelog;
 versions follow Semantic Versioning (in 0.x, a minor bump may break
 compatibility).
 
-## Unreleased
+## 0.1.0 - 2026-11-20
 
 ### Added
 - Speed: parallel SHA-256 hashing across files, an on-disk hash cache
