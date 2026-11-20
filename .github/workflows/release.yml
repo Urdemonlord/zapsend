@@ -18,7 +18,7 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -53,9 +53,15 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: ./target/${{ matrix.target }}/release/zapsend --version
       - name: Package
+        # The tag reaches the shell only through an environment variable:
+        # GitHub substitutes the value without shell parsing, so a tag such
+        # as v$(id) is a plain string here, never executed. Never put
+        # ${{ github.ref_name }} inside a run: block.
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           set -eu
-          tag="${{ github.ref_name }}"
+          tag="$TAG"
           staging="pkg/zapsend-${tag}-${{ matrix.target }}"
           mkdir -p "$staging"
           cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "$staging/"
@@ -76,6 +82,8 @@ jobs:
     name: publish draft release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

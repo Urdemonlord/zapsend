@@ -1,9 +1,8 @@
-# Cross-compilation linkers. Without these, cargo links a cross build with
-# the host `cc` and the link fails (e.g. aarch64: rust-lld rejects
-# --fix-cortex-a53-843419 from an x86_64 linker). The release workflow
+# Cross-compilation linkers. Only aarch64 needs one set explicitly: without
+# it, cargo links the cross build with the host `cc` and the link fails
+# (rust-lld rejects --fix-cortex-a53-843419 from an x86_64 linker). The
+# Windows target needs no entry: rustc already defaults
+# `x86_64-pc-windows-gnu` to `x86_64-w64-mingw32-gcc`. The release workflow
 # installs the same compilers via apt before building.
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
-
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
