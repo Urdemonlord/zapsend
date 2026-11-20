@@ -694,17 +694,9 @@ fn looks_like_scheme_mismatch(e: &anyhow::Error) -> bool {
         || msg.contains("received corrupt message")
 }
 
-async fn send_files_over(
-    peer: &Peer,
-    me: &DeviceInfo,
-    uploads: &[Upload],
-    pin: Option<&str>,
-    retries: u32,
-) -> Result<()> {
-    if uploads.is_empty() {
-        bail!("no files to send");
-    }
-
+/// The pending uploads for a send: one entry per file, with the size the
+/// receiver will check against.
+fn pending_from(uploads: &[Upload]) -> Result<Vec<Pending>> {
     let mut pending = Vec::new();
     for (idx, upload) in uploads.iter().enumerate() {
         let meta = std::fs::metadata(&upload.path)
@@ -717,20 +709,21 @@ async fn send_files_over(
             replace: upload.replace,
         });
     }
+    Ok(pending)
+}
 
-    let spinner = ProgressBar::new_spinner();
-    spinner.set_message("hashing…");
-    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
+/// The file metas `prepare-upload` needs: a SHA-256 per file, taken from the
+/// hash cache when the file is unchanged, computed (bounded, in parallel)
+/// when it is not. The hash itself is still SHA-256: the protocol and the
+/// receiver's resume bookkeeping both depend on it.
+async fn hash_pending(pending: &[Pending]) -> Result<HashMap<String, FileMeta>> {
     // The sender hash is a full extra read pass, so it is made cheap two
     // ways: a cache keyed by (path, size, mtime) for files sent before, and
     // hashing the cache misses concurrently instead of one file at a time.
-    // The hash itself is still SHA-256: the protocol and the receiver's
-    // resume bookkeeping both depend on it.
     let mut cache = crate::hashcache::HashCache::load();
     let mut files = HashMap::new();
     let mut to_hash: Vec<&Pending> = Vec::new();
-    for item in &pending {
+    for item in pending {
         match cache.lookup(&item.path, item.size) {
             Some(sha) => {
                 files.insert(item.id.clone(), file_meta(item, sha));
@@ -771,6 +764,40 @@ async fn send_files_over(
         }
         cache.save();
     }
+    Ok(files)
+}
+
+/// Hash every upload once and leave the results in the hash cache, so a
+/// fan-out to N hosts does not hash the same bytes N times: without this,
+/// N parallel sends all miss the cache at once and each pays a full hashing
+/// pass over the same file. A later `send_files` for the same files finds
+/// the cache warm and skips hashing entirely.
+pub(crate) async fn warm_hash_cache(uploads: &[Upload]) -> Result<()> {
+    let pending = pending_from(uploads)?;
+    // The map itself is thrown away: the cache save inside `hash_pending`
+    // is the point.
+    let _ = hash_pending(&pending).await?;
+    Ok(())
+}
+
+async fn send_files_over(
+    peer: &Peer,
+    me: &DeviceInfo,
+    uploads: &[Upload],
+    pin: Option<&str>,
+    retries: u32,
+) -> Result<()> {
+    if uploads.is_empty() {
+        bail!("no files to send");
+    }
+
+    let pending = pending_from(uploads)?;
+
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_message("hashing…");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+    let files = hash_pending(&pending).await?;
     spinner.finish_and_clear();
 
     let http = peer_client(peer)?;
