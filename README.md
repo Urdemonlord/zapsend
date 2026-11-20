@@ -29,7 +29,7 @@ film.mkv [============>               ] 1.2 GiB/4.1 GiB (12s)
 ✓ done
 ```
 
-> **Status: v0.0.24.** Send, receive, resume, folders, fan-out, fan-in, a
+> **Status: v0.1.0.** Send, receive, resume, folders, fan-out, fan-in, a
 > watched folder, sync and a browser-readable share page all work. Interop is
 > checked in all four directions against an independent implementation, and the
 > share page is checked in a real browser at phone and desktop width. No GUI,
@@ -63,21 +63,21 @@ independent implementation: see `tests/interop-lsq.sh`.
 
 ## Install
 
-The fastest way, no Rust toolchain needed:
+The fastest way on Linux and Windows (Git Bash), no Rust toolchain needed:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Urdemonlord/zapsend/master/install.sh | sh
 ```
 
 That downloads the matching release binary for your OS and CPU, verifies
-its SHA-256, and installs it to `~/.local/bin`. Pick a version or a
-different directory:
+its SHA-256, and installs it to `~/.local/bin` (`zapsend.exe` on Windows,
+run the installer from Git Bash). Pick a version or a different directory:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Urdemonlord/zapsend/master/install.sh | sh -s -- --version v0.1.0 --dir ~/.local/bin
 ```
 
-Prebuilt binaries are also on the [releases page](https://github.com/Urdemonlord/zapsend/releases): Linux x86_64 and aarch64, Windows x86_64, each with a `.sha256` file. macOS has no prebuilt binary yet; use `cargo install` below.
+Prebuilt binaries are also on the [releases page](https://github.com/Urdemonlord/zapsend/releases): Linux x86_64 and aarch64, Windows x86_64, each with a `.sha256` file. macOS has no prebuilt binary yet; use `cargo install` below. Linux binaries are glibc-linked, so musl systems such as Alpine Linux are not supported by the installer. The SHA-256 check proves the download was not corrupted in transit; it cannot prove the release itself was not replaced, since the checksum ships in the same release, so compare it with the releases page in your browser or build from source if that matters to you.
 
 Or install from crates.io:
 

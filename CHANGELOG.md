@@ -10,15 +10,17 @@ compatibility).
 - Speed: parallel SHA-256 hashing across files, an on-disk hash cache
   (`~/.cache/zapsend/hashes.json`), up to 4 concurrent file uploads, and
   256 KiB transfer chunks. 1 GiB loopback: 33.9 s -> 10.1 s with a warm
-  cache (~101 MB/s). (PR #1)
-- Security: `--ip` without a fingerprint is now refused; use
-  `zapsend trust NAME`, `--fingerprint`, or `--tofu` to pin a peer on
-  first use. (PR #2)
+  cache (~101 MiB/s). (PR #1)
 - Sync: `sync --replace` replaces a changed file on the receiver, backing
   the old file up first and verifying the hash afterwards. Without the
   flag, a conflict still aborts the run. (PR #2)
 - Distribution: GitHub Release workflow (Linux x86_64 + aarch64, Windows
   x86_64) and an `install.sh` one-line installer with SHA-256 verification.
+
+### Changed
+- **Breaking:** bare `--ip` is now refused; a peer must be verified first.
+  Migrate with `zapsend trust NAME`, `--fingerprint`, or `--tofu` to pin a
+  peer on first use. (PR #2)
 
 ### Fixed
 - Resume: a resumed upload used to overwrite the stored prefix from
