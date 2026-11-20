@@ -77,7 +77,7 @@ run the installer from Git Bash). Pick a version or a different directory:
 curl -fsSL https://raw.githubusercontent.com/Urdemonlord/zapsend/master/install.sh | sh -s -- --version v0.1.0 --dir ~/.local/bin
 ```
 
-Prebuilt binaries are also on the [releases page](https://github.com/Urdemonlord/zapsend/releases): Linux x86_64 and aarch64, Windows x86_64, each with a `.sha256` file. macOS has no prebuilt binary yet; use `cargo install` below. Linux binaries are glibc-linked, so musl systems such as Alpine Linux are not supported by the installer. The SHA-256 check proves the download was not corrupted in transit; it cannot prove the release itself was not replaced, since the checksum ships in the same release, so compare it with the releases page in your browser or build from source if that matters to you.
+Prebuilt binaries are also on the [releases page](https://github.com/Urdemonlord/zapsend/releases): Linux x86_64 and aarch64, Windows x86_64, each with a `.sha256` file. macOS has no prebuilt binary yet; use `cargo install` below. Linux binaries are glibc-linked, so musl systems such as Alpine Linux are not supported by the installer. The SHA-256 check proves the download was not corrupted in transit; it cannot prove the release itself was not replaced, since the checksum ships in the same release, so build from source, or compare against a checksum you obtained earlier through a channel you already trust, if that matters to you.
 
 Or install from crates.io:
 
@@ -361,7 +361,7 @@ answer:
 ```
 zapsend doctor
 
-  version     0.0.11
+  version     0.1.0
   device      "AZAZEL" (headless)
   fingerprint ab9628b1
   api port    53317
@@ -484,7 +484,7 @@ zapsend receive --dir ~/Downloads --ask
 
 ```
   +--------------------------------------------+
-  | zapsend 0.0.1                              |
+  | zapsend 0.1.0                              |
   | headless file transfer, LocalSend protocol |
   +--------------------------------------------+
 

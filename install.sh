@@ -12,9 +12,10 @@
 # What the SHA-256 check proves: the checksum is published in the same
 # GitHub Release as the binary, so it proves the download was not corrupted
 # in transit, but it cannot prove the release itself was not replaced. If
-# that matters to you, compare the checksum with the one shown on the
-# releases page in your browser, or build from source, before running this
-# script. Signed assets (minisign/cosign) are not used: a signature would
+# that matters to you, build from source, or compare against a checksum you
+# obtained earlier through a channel you already trust. Either way you are
+# trusting the release publisher. Signed assets (minisign/cosign) are not
+# used: a signature would
 # only move the trust problem to the signing key, which a first-time
 # installer would still have to fetch from the same place, and it would add
 # key management to every release for a project with one maintainer.
@@ -107,23 +108,28 @@ case "$kind" in
   windows)
     if command -v unzip >/dev/null 2>&1; then
       unzip -o -q "$tmp/$asset" -d "$tmp"
-    elif command -v tar >/dev/null 2>&1; then
-      # Git Bash ships bsdtar as tar, which extracts zip archives.
+    elif command -v bsdtar >/dev/null 2>&1; then
+      bsdtar -xf "$tmp/$asset" -C "$tmp"
+    elif command -v tar >/dev/null 2>&1 && tar --version 2>&1 | grep -qi bsdtar; then
+      # Git Bash ships bsdtar as tar, which extracts zip archives. GNU tar
+      # cannot extract zip archives, so only accept tar when it is bsdtar.
       tar -xf "$tmp/$asset" -C "$tmp"
     else
-      echo "need unzip or tar to extract the Windows archive" >&2; exit 1
+      echo "need unzip or bsdtar to extract the Windows archive" >&2; exit 1
     fi
     ;;
 esac
 
 # Stage the new binary inside $INSTALL_DIR (same filesystem, so the final
-# rename is atomic), smoke-test it there, then move it into place. A failed
+# rename is atomic), smoke-test it there, then move it into place. The staged
+# name keeps the binary's suffix ($bin), so on Windows it is still a .exe the
+# smoke test can run. A failed
 # download, check, or test leaves the installed binary untouched, and an
 # upgrade while `zapsend daemon` runs does not hit "Text file busy": rename
 # replaces the directory entry while the running process keeps the old file.
 # On Windows the rename fails if the binary is running; the error below
 # says so instead of leaving a half-installed binary behind.
-staged="$INSTALL_DIR/.zapsend.new.$$"
+staged="$INSTALL_DIR/.zapsend.new.$$.$bin"
 trap 'rm -f "$staged"; rm -rf "$tmp"' EXIT INT TERM
 cp "$tmp/zapsend-${VERSION}-${target}/$bin" "$staged"
 chmod +x "$staged"
