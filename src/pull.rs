@@ -160,7 +160,8 @@ async fn pull_one(
     // A peer that shares over plain HTTP (the Download API in browser mode)
     // answers https with a TLS error that reads like a broken machine. Flip the
     // scheme once and keep the peer we flipped: the downloads that follow must
-    // use the same one.
+    // use the same one. A flip to HTTP after the gate approved HTTPS is the
+    // same downgrade the gate refuses, so it runs the gate again first.
     let (session_id, files) = match client::prepare_download(&peer, pin.as_deref()).await {
         Ok(pair) => pair,
         Err(e) if format!("{e:#}").to_lowercase().contains("invalidcontenttype")
@@ -171,6 +172,13 @@ async fn pull_one(
             } else {
                 "http".to_string()
             };
+            if peer.info.protocol.eq_ignore_ascii_case("http") {
+                crate::require_verified(
+                    &peer,
+                    opts.plain,
+                    "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+                )?;
+            }
             eprintln!(
                 "! {} did not answer over the first scheme — retrying over {}",
                 peer.ip, peer.info.protocol

@@ -211,7 +211,10 @@ async fn send(
         .sum();
     let files = uploads.len();
 
-    client::send_files(&peer, &ui.app.me, &uploads, req.pin.as_deref(), 3)
+    // The web UI has no --plain opt-in, so a fingerprinted peer is never
+    // retried over cleartext here; an unpinned --ip peer still flips, the
+    // way a plain receiver needs it to.
+    client::send_files(&peer, &ui.app.me, &uploads, req.pin.as_deref(), 3, false)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 

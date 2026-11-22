@@ -268,7 +268,21 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             } else {
                 for t in targets.iter().filter(|t| !already.contains(*t)) {
                     match crate::hosts::peer(t).await {
-                        Ok(Some(p)) => hops.push((t.clone(), p)),
+                        // The single-target path gates in ensure_peer, but
+                        // these hops never went through it: a fingerprinted
+                        // entry that now serves HTTP must be refused here,
+                        // not handed straight to send_files.
+                        Ok(Some(p)) => match crate::require_verified(
+                            &p,
+                            opts.plain,
+                            "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+                        ) {
+                            Ok(()) => hops.push((t.clone(), p)),
+                            Err(e) => eprintln!(
+                                "! {name}: {t}: {}",
+                                e.to_string().lines().next().unwrap_or("refused")
+                            ),
+                        },
                         Ok(None) => eprintln!(
                             "! {name}: {t} is not in the hosts file — `zapsend trust {t} --ip <addr>` first"
                         ),
@@ -287,7 +301,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             let mut bytes = 0u64;
             for (t, p) in &hops {
                 let pin = crate::hosts::resolve_pin(opts.pin.clone(), Some(t.as_str()));
-                match send_one(&stack, p, &path, pin.as_deref()).await {
+                match send_one(&stack, p, &path, pin.as_deref(), opts.plain).await {
                     Ok((f, b)) => {
                         files = f;
                         bytes += b;
@@ -347,6 +361,7 @@ async fn send_one(
     peer: &Peer,
     path: &Path,
     pin: Option<&str>,
+    plain: bool,
 ) -> Result<(usize, u64)> {
     let uploads = crate::collect_uploads(std::slice::from_ref(&path.to_path_buf()))?;
     let bytes: u64 = uploads
@@ -356,7 +371,7 @@ async fn send_one(
         .sum();
     // The daemon re-queues anything that fails, so a couple of in-place
     // attempts is enough; a long retry chain would stall the whole folder.
-    client::send_files(peer, &stack.me, &uploads, pin, 2).await?;
+    client::send_files(peer, &stack.me, &uploads, pin, 2, plain).await?;
     Ok((uploads.len(), bytes))
 }
 
