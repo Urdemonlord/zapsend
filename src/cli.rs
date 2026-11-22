@@ -132,11 +132,13 @@ pub enum Command {
         /// The peer serves plain HTTP (`receive --plain` on a private
         /// network). With --ip it skips the TLS probe, so the connection
         /// never attempts a handshake the peer cannot answer. With --to the
-        /// flag is not needed: a stored entry, or a discovery announcement,
-        /// already carries the scheme. Plain mode only changes the
-        /// transport, never the target, and it sends the PIN and the files
-        /// in the clear, so only ever use it where the link itself is already
-        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        /// flag is usually not needed, because a stored entry, or a discovery
+        /// announcement, already carries the scheme. It is still needed when
+        /// a fingerprinted entry now serves plain HTTP: the gate refuses that
+        /// downgrade without it. Plain mode only changes the transport, never
+        /// the target, and it sends the PIN and the files in the clear, so
+        /// only ever use it where the link itself is already encrypted
+        /// (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
         plain: bool,
     },
@@ -220,11 +222,13 @@ pub enum Command {
         /// The peer serves plain HTTP (`receive --plain` on a private
         /// network). With --ip it skips the TLS probe, so the connection
         /// never attempts a handshake the peer cannot answer. With --to the
-        /// flag is not needed: a stored entry, or a discovery announcement,
-        /// already carries the scheme. Plain mode only changes the
-        /// transport, never the target, and it sends the PIN and the files
-        /// in the clear, so only ever use it where the link itself is already
-        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        /// flag is usually not needed, because a stored entry, or a discovery
+        /// announcement, already carries the scheme. It is still needed when
+        /// a fingerprinted entry now serves plain HTTP: the gate refuses that
+        /// downgrade without it. Plain mode only changes the transport, never
+        /// the target, and it sends the PIN and the files in the clear, so
+        /// only ever use it where the link itself is already encrypted
+        /// (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
         plain: bool,
     },
@@ -305,11 +309,13 @@ pub enum Command {
         /// The peer serves plain HTTP (`receive --plain` on a private
         /// network). With --ip it skips the TLS probe, so the connection
         /// never attempts a handshake the peer cannot answer. With --to the
-        /// flag is not needed: a stored entry, or a discovery announcement,
-        /// already carries the scheme. Plain mode only changes the
-        /// transport, never the target, and it sends the PIN and the files
-        /// in the clear, so only ever use it where the link itself is already
-        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        /// flag is usually not needed, because a stored entry, or a discovery
+        /// announcement, already carries the scheme. It is still needed when
+        /// a fingerprinted entry now serves plain HTTP: the gate refuses that
+        /// downgrade without it. Plain mode only changes the transport, never
+        /// the target, and it sends the PIN and the files in the clear, so
+        /// only ever use it where the link itself is already encrypted
+        /// (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
         plain: bool,
     },
@@ -367,11 +373,13 @@ pub enum Command {
         /// The peer serves plain HTTP (`receive --plain` on a private
         /// network). With --ip it skips the TLS probe, so the connection
         /// never attempts a handshake the peer cannot answer. With --to the
-        /// flag is not needed: a stored entry, or a discovery announcement,
-        /// already carries the scheme. Plain mode only changes the
-        /// transport, never the target, and it sends the PIN and the files
-        /// in the clear, so only ever use it where the link itself is already
-        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        /// flag is usually not needed, because a stored entry, or a discovery
+        /// announcement, already carries the scheme. It is still needed when
+        /// a fingerprinted entry now serves plain HTTP: the gate refuses that
+        /// downgrade without it. Plain mode only changes the transport, never
+        /// the target, and it sends the PIN and the files in the clear, so
+        /// only ever use it where the link itself is already encrypted
+        /// (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
         plain: bool,
     },

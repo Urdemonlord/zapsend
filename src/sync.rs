@@ -39,8 +39,9 @@ pub struct Options {
     pub replace: bool,
     pub retries: u32,
     /// The peer serves plain HTTP (`receive --plain` on a private network).
-    /// Only the --ip path reads it; with --to the stored entry already
-    /// carries the scheme, so the flag is not needed there.
+    /// The gate reads it on every path, not only --ip: with --to a
+    /// fingerprinted entry that now serves HTTP still needs --plain to
+    /// accept the downgrade.
     pub plain: bool,
 }
 
@@ -90,6 +91,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
             &plan.todo,
             pin.as_deref(),
             opts.retries,
+            opts.plain,
         )
         .await
         .context("the peer took the manifest but refused the upload")?;
@@ -252,6 +254,11 @@ async fn resolve(alias: &str, port: u16, opts: &Options) -> Result<Peer> {
         // so the scheme is still the assumed one. Ask now, the way send()
         // does, or require_verified cannot tell a downgraded peer from a
         // verified one. A peer that does not answer is not a reason to refuse.
+        // This repeats the fetch resolve_ip_peer made on the tofu path, but
+        // the refresh cannot be skipped on the strength of --tofu alone: a
+        // stored entry returns early without fetching, so only the callee
+        // knows whether it asked, and one extra /info is cheaper than
+        // threading that answer through every caller.
         if let Ok(info) = client::fetch_info(&peer).await {
             peer.info.zapsend_resume = info.zapsend_resume;
             peer.info.download = info.download;

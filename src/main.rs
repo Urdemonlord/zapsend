@@ -889,7 +889,7 @@ async fn send(
     }
 
     let pin = hosts::resolve_pin(pin, to.as_deref());
-    client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries).await?;
+    client::send_files(&peer, &stack.me, &uploads, pin.as_deref(), retries, plain).await?;
     if json_mode() {
         println!(
             "{}",
@@ -1007,7 +1007,7 @@ async fn send_to_peer(
         )
         .map_err(|e| format!("{e:#}"))?;
         eprintln!("→ {name} ({}:{})", peer.ip, peer.info.port);
-        client::send_files(&peer, me, uploads, pin.as_deref(), retries)
+        client::send_files(&peer, me, uploads, pin.as_deref(), retries, plain)
             .await
             .map_err(|e| e.to_string())?;
         Ok(Delivered {

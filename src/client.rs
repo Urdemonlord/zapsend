@@ -195,7 +195,10 @@ pub struct Upload {
 /// Read a peer's own `info` document, the way `doctor` proves a device is
 /// reachable. Tries the advertised scheme first and the other one once, because
 /// a `--ip` target has no announcement telling us whether it serves HTTP or
-/// HTTPS.
+/// HTTPS. The returned `protocol` is the scheme that answered, not the one the
+/// peer advertised: an answer is the only thing that proves which transport
+/// the peer actually serves, and the gate that runs next must decide on that,
+/// not on a claim in the document.
 pub async fn fetch_info(peer: &Peer) -> Result<DeviceInfo> {
     let http = peer_client(peer)?;
 
@@ -205,8 +208,11 @@ pub async fn fetch_info(peer: &Peer) -> Result<DeviceInfo> {
         match http.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let body = resp.bytes().await?;
-                return serde_json::from_slice(&body)
-                    .with_context(|| format!("peer answered {url} with something that is not info"));
+                let mut info: DeviceInfo = serde_json::from_slice(&body).with_context(|| {
+                    format!("peer answered {url} with something that is not info")
+                })?;
+                info.protocol = scheme.to_string();
+                return Ok(info);
             }
             Ok(resp) => {
                 let code = resp.status();
@@ -511,12 +517,18 @@ fn part_path(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
+/// Send, retrying once over the other scheme when the peer refuses our TLS.
+/// The retry is not a downgrade: flipping to HTTP after the gate approved
+/// HTTPS would send the PIN and the files in the clear to a peer the caller
+/// trusted by fingerprint. `plain` is the caller's explicit opt-in for that,
+/// and without it a fingerprinted peer is refused instead of retried.
 pub async fn send_files(
     peer: &Peer,
     me: &DeviceInfo,
     uploads: &[Upload],
     pin: Option<&str>,
     retries: u32,
+    plain: bool,
 ) -> Result<()> {
     match send_files_over(peer, me, uploads, pin, retries).await {
         Err(e) if looks_like_scheme_mismatch(&e) => {
@@ -526,6 +538,17 @@ pub async fn send_files(
             } else {
                 "http".to_string()
             };
+            // A flip to HTTP runs the same gate the send did: the peer was
+            // approved on HTTPS, and a cleartext retry after that approval
+            // is the downgrade the gate exists to refuse. An upgrade to
+            // HTTPS always passes it.
+            if flipped.info.protocol.eq_ignore_ascii_case("http") {
+                crate::require_verified(
+                    &flipped,
+                    plain,
+                    "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+                )?;
+            }
             eprintln!(
                 "! {} did not answer over {} — retrying over {}",
                 peer.ip, peer.info.protocol, flipped.info.protocol
@@ -1057,4 +1080,156 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::PROTOCOL_VERSION;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// A plain-HTTP server that answers everything with 400 and remembers the
+    /// HTTP request lines it saw. A TLS ClientHello arrives as binary bytes,
+    /// so it is answered the same way but never recorded as a request: that
+    /// is what makes the dummy useful, a peer that speaks HTTP where TLS was
+    /// expected.
+    /// The port is fixed, never 0: an ephemeral port is a new destination on
+    /// every run, and each new destination asks for its own approval.
+    fn start_dummy(port: u16) -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen2 = Arc::clone(&seen);
+        let stop2 = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                        let mut buf = [0u8; 4096];
+                        if let Ok(n) = stream.read(&mut buf) {
+                            let text = String::from_utf8_lossy(&buf[..n]);
+                            if let Some(first) = text.lines().next() {
+                                if first.starts_with("POST ") || first.starts_with("GET ") {
+                                    seen2.lock().unwrap().push(first.to_string());
+                                }
+                            }
+                        }
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                        let _ = stream.flush();
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (port, seen, stop)
+    }
+
+    /// The test binary never runs main(), so the process-level provider the
+    /// binary installs there has to be installed here, once.
+    fn install_crypto_provider() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
+    fn peer(port: u16) -> Peer {
+        Peer {
+            info: DeviceInfo {
+                zapsend_resume: false,
+                alias: "dummy".to_string(),
+                version: PROTOCOL_VERSION.to_string(),
+                device_model: None,
+                device_type: None,
+                fingerprint: "ab".repeat(32),
+                port,
+                protocol: "https".to_string(),
+                download: false,
+            },
+            ip: "127.0.0.1".parse().unwrap(),
+        }
+    }
+
+    fn me() -> DeviceInfo {
+        DeviceInfo {
+            zapsend_resume: false,
+            alias: "test".to_string(),
+            version: PROTOCOL_VERSION.to_string(),
+            device_model: None,
+            device_type: None,
+            fingerprint: String::new(),
+            port: 53317,
+            protocol: "https".to_string(),
+            download: false,
+        }
+    }
+
+    fn payload(tag: &str) -> (PathBuf, Upload) {
+        let path = std::env::temp_dir().join(format!(
+            "zapsend-flip-test-{}-{}.bin",
+            std::process::id(),
+            tag
+        ));
+        std::fs::write(&path, b"flip-guard-payload").unwrap();
+        let upload = Upload {
+            path: path.clone(),
+            name: "flip.bin".to_string(),
+            replace: false,
+        };
+        (path, upload)
+    }
+
+    #[tokio::test]
+    async fn send_files_refuses_a_cleartext_retry_for_a_fingerprinted_peer() {
+        install_crypto_provider();
+        let (port, seen, stop) = start_dummy(53524);
+        let (path, upload) = payload("refuse");
+        let err = send_files(&peer(port), &me(), &[upload], Some("123456"), 1, false)
+            .await
+            .expect_err("the retry must be refused, not retried in the clear");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refusing to talk to") && msg.contains("plain HTTP"),
+            "the error must name the downgrade: {msg}"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no HTTP request may reach the peer: {:?}",
+            seen.lock().unwrap()
+        );
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn send_files_retries_over_http_when_plain_is_given() {
+        install_crypto_provider();
+        let (port, seen, stop) = start_dummy(53525);
+        let (path, upload) = payload("plain");
+        let err = send_files(&peer(port), &me(), &[upload], Some("123456"), 1, true)
+            .await
+            .expect_err("the dummy cannot complete a transfer");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("refusing to talk to"),
+            "the opt-in must allow the retry, not refuse it: {msg}"
+        );
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|line| line.contains("prepare-upload")),
+            "the flipped retry must reach the peer over HTTP: {seen:?}"
+        );
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::fs::remove_file(path);
+    }
 }
