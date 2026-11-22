@@ -51,6 +51,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
     let peer = resolve(alias, port, &opts).await?;
     crate::require_verified(
         &peer,
+        opts.plain,
         "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
     )?;
     // `--pin` wins, otherwise the PIN `zapsend trust` remembered for this name.
@@ -245,8 +246,21 @@ async fn verify_replaced(
 /// devices that answered.
 async fn resolve(alias: &str, port: u16, opts: &Options) -> Result<Peer> {
     if let Some(raw) = opts.ip.as_deref() {
-        return crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "sync with", opts.plain)
-            .await;
+        let mut peer = crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "sync with", opts.plain)
+            .await?;
+        // resolve_ip_peer does not ask the machine unless it has to (tofu),
+        // so the scheme is still the assumed one. Ask now, the way send()
+        // does, or require_verified cannot tell a downgraded peer from a
+        // verified one. A peer that does not answer is not a reason to refuse.
+        if let Ok(info) = client::fetch_info(&peer).await {
+            peer.info.zapsend_resume = info.zapsend_resume;
+            peer.info.download = info.download;
+            peer.info.protocol = info.protocol;
+            if !info.alias.is_empty() {
+                peer.info.alias = info.alias;
+            }
+        }
+        return Ok(peer);
     }
     match crate::peer_from_hosts(alias, port, &opts.to).await? {
         Some((_stack, known)) => Ok(known),

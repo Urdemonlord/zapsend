@@ -1,10 +1,11 @@
 //! Plain HTTP end to end: a `receive --plain` receiver on loopback, then
 //! `trust --plain`, `send --plain`, `pull --plain` and `doctor --plain`
-//! against it, with the bytes checked both ways. Plus the two guardrails:
+//! against it, with the bytes checked both ways. Plus the guardrails:
 //! `trust --plain` against a TLS receiver must fail (never silently
-//! downgrade), and `trust` without `--plain` against a plain receiver must
-//! fail. TLS itself is covered by the last test, so a regression that breaks
-//! the default is caught here too.
+//! downgrade), `trust` without `--plain` against a plain receiver must
+//! fail, and a fingerprinted entry whose peer now serves plain HTTP must be
+//! refused unless the send passes `--plain`. TLS itself is covered by the
+//! last test, so a regression that breaks the default is caught here too.
 //!
 //! Everything runs on loopback, which is a private network by definition —
 //! plain mode is only ever for links that are already encrypted (Tailscale,
@@ -362,6 +363,60 @@ fn plain_flag_never_downgrades_a_tls_peer_and_tls_still_works() {
     assert_eq!(got, bytes, "TLS receiver got different bytes");
 
     tls.kill();
+    let _ = fs::remove_dir_all(&work);
+}
+
+#[test]
+fn fingerprinted_entry_that_now_serves_plain_http_is_refused() {
+    let work = std::env::temp_dir().join(format!("zapsend-plain-downgrade-test-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+
+    let payload = work.join("payload.bin");
+    let bytes: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+    fs::write(&payload, &bytes).unwrap();
+
+    // Trust the TLS receiver, then restart the same port as plain: the entry
+    // now points at a machine whose certificate the fingerprint cannot pin,
+    // because a cleartext peer has no certificate at all.
+    let mut tls = start_receiver(&work, "tls3", 53523, false, None);
+    wait_log_contains(&work, "tls3", "fingerprint ");
+    let out = run(
+        &work,
+        &["trust", "tls3", "--ip", "127.0.0.1:53523", "--pin", "123456"],
+    );
+    assert_ok(&out, "trust a TLS receiver");
+    tls.kill();
+
+    let mut plain = start_receiver(&work, "plain3", 53523, true, None);
+
+    // Without --plain the send must fail, and nothing may land.
+    let out = run(
+        &work,
+        &["send", payload.to_str().unwrap(), "--to", "tls3", "--pin", "123456"],
+    );
+    assert_fails(&out, "send to a fingerprinted entry that now serves plain HTTP");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("plain HTTP"),
+        "the refusal must name the downgrade: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !plain.dir.join("payload.bin").exists(),
+        "the refused send must not deliver anything"
+    );
+
+    // With --plain the caller explicitly accepts cleartext, so the same
+    // send reaches the receiver with the exact bytes.
+    let out = run(
+        &work,
+        &["send", payload.to_str().unwrap(), "--to", "tls3", "--plain", "--pin", "123456"],
+    );
+    assert_ok(&out, "send --to tls3 --plain (explicit cleartext opt-in)");
+    let got = fs::read(plain.dir.join("payload.bin")).unwrap();
+    assert_eq!(got, bytes, "plain receiver got different bytes on --plain send");
+
+    plain.kill();
     let _ = fs::remove_dir_all(&work);
 }
 

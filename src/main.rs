@@ -701,20 +701,34 @@ The peer's certificate cannot be checked against anything you have seen before, 
     )
 }
 
-/// Refuse to use a peer whose certificate cannot be pinned, unless it serves
-/// plain HTTP — then there is no certificate at all, and the warning says
-/// so. Discovery and `trust` always supply a fingerprint; an empty one here
-/// means a hand-edited hosts entry, or a `--ip` that slipped past
-/// `resolve_ip_peer`.
-pub(crate) fn require_verified(peer: &Peer, fix: &str) -> Result<()> {
-    if !peer.info.fingerprint.is_empty() {
-        return Ok(());
-    }
+/// Refuse to use a peer whose certificate cannot be pinned. A fingerprint
+/// is only worth anything over TLS: a fingerprinted peer that now answers
+/// over plain HTTP is a downgrade, not a verified peer, because there is no
+/// certificate to pin the fingerprint against. Only an explicit `--plain`
+/// accepts that, and the caller has to say so on this command. Discovery and
+/// `trust` always supply a fingerprint; an empty one here means a hand-edited
+/// hosts entry, or a `--ip` that slipped past `resolve_ip_peer`.
+pub(crate) fn require_verified(peer: &Peer, plain: bool, fix: &str) -> Result<()> {
     if peer.info.protocol.eq_ignore_ascii_case("http") {
+        if !peer.info.fingerprint.is_empty() && !plain {
+            bail!(
+                "refusing to talk to {} ({}:{}) over plain HTTP: it is trusted with a certificate fingerprint, but a cleartext peer has no certificate to pin.
+
+Either the machine was reconfigured to serve plain HTTP, or something on this network is pretending to be it. Fix it one of these ways:
+  re-trust it as a plain peer: `zapsend trust NAME --ip ADDR --plain`
+  add --plain to this command (private network only, never on the open internet)",
+                peer.info.alias,
+                peer.ip,
+                peer.info.port
+            );
+        }
         eprintln!(
             "! {} serves plain HTTP — there is no certificate to pin, traffic is unencrypted",
             peer.info.alias
         );
+        return Ok(());
+    }
+    if !peer.info.fingerprint.is_empty() {
         return Ok(());
     }
     bail!(
@@ -782,7 +796,7 @@ async fn send(
         if list != "all" && names.len() < 2 {
             bail!("--to {list:?} needs at least two names");
         }
-        return fan_out(alias, port, files, &names, pin, retries).await;
+        return fan_out(alias, port, files, &names, pin, retries, plain).await;
     }
 
     // Straight-to-address sends need neither a server nor discovery, so they
@@ -864,6 +878,7 @@ async fn send(
     );
     require_verified(
         &peer,
+        plain,
         "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
     )?;
     if !peer.info.fingerprint.is_empty() {
@@ -973,6 +988,7 @@ async fn send_to_peer(
     name: String,
     pin: Option<String>,
     retries: u32,
+    plain: bool,
 ) -> HostOutcome {
     let result = async {
         let Some(peer) = hosts::peer(&name).await.map_err(|e| e.to_string())? else {
@@ -986,6 +1002,7 @@ async fn send_to_peer(
         // path does, instead of letting the unpinned client talk to it.
         require_verified(
             &peer,
+            plain,
             "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
         )
         .map_err(|e| format!("{e:#}"))?;
@@ -1018,6 +1035,7 @@ async fn fan_out(
     names: &[String],
     pin: Option<String>,
     retries: u32,
+    plain: bool,
 ) -> Result<()> {
     let uploads = collect_uploads(&files)?;
     let bytes: u64 = uploads
@@ -1052,7 +1070,7 @@ async fn fan_out(
         move |(name, pin)| {
             let me = me.clone();
             let uploads = uploads.clone();
-            async move { send_to_peer(&me, &uploads, name, pin, retries).await }
+            async move { send_to_peer(&me, &uploads, name, pin, retries, plain).await }
         }
     })
     .await?;

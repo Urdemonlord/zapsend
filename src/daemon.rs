@@ -424,10 +424,6 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
         }
     }
 
-    crate::require_verified(
-        &peer,
-        "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
-    )?;
     // resolve_ip_peer with --plain returns before asking the machine, so
     // resume support stays unknown; ask now, the way send() does. A peer
     // that does not answer is not a reason to refuse the run.
@@ -439,6 +435,14 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
             peer.info.alias = info.alias;
         }
     }
+    // The gate runs after the fetch on purpose: only the fetched scheme
+    // tells a downgraded peer from a verified one, and the assumed one
+    // would pass either way.
+    crate::require_verified(
+        &peer,
+        opts.plain,
+        "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+    )?;
     println!(
         "  target      \"{}\" {}:{}",
         peer.info.alias, peer.ip, peer.info.port
