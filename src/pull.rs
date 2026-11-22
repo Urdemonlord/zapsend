@@ -139,6 +139,7 @@ async fn pull_one(
 
     crate::require_verified(
         &peer,
+        opts.plain,
         "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
     )?;
     if !peer.info.fingerprint.is_empty() {
