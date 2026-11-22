@@ -130,9 +130,11 @@ pub enum Command {
         retry: u32,
 
         /// The peer serves plain HTTP (`receive --plain` on a private
-        /// network). Skips the TLS probe, so the connection never attempts a
-        /// handshake the peer cannot answer. Plain mode only changes the
-        /// transport, never the target — and it sends the PIN and the files
+        /// network). With --ip it skips the TLS probe, so the connection
+        /// never attempts a handshake the peer cannot answer. With --to the
+        /// flag is not needed: a stored entry, or a discovery announcement,
+        /// already carries the scheme. Plain mode only changes the
+        /// transport, never the target, and it sends the PIN and the files
         /// in the clear, so only ever use it where the link itself is already
         /// encrypted (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
@@ -216,9 +218,11 @@ pub enum Command {
         retry: u32,
 
         /// The peer serves plain HTTP (`receive --plain` on a private
-        /// network). Skips the TLS probe, so the connection never attempts a
-        /// handshake the peer cannot answer. Plain mode only changes the
-        /// transport, never the target — and it sends the PIN and the files
+        /// network). With --ip it skips the TLS probe, so the connection
+        /// never attempts a handshake the peer cannot answer. With --to the
+        /// flag is not needed: a stored entry, or a discovery announcement,
+        /// already carries the scheme. Plain mode only changes the
+        /// transport, never the target, and it sends the PIN and the files
         /// in the clear, so only ever use it where the link itself is already
         /// encrypted (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
@@ -244,11 +248,13 @@ pub enum Command {
         dir: PathBuf,
 
         /// The peer serves plain HTTP (`receive --plain` on a private
-        /// network). Skips the TLS probe, so the connection never attempts a
-        /// handshake the peer cannot answer. Plain mode only changes the
-        /// transport, never the target — and it sends the PIN and the files
-        /// in the clear, so only ever use it where the link itself is already
-        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        /// network). With --ip it starts the probe over plain HTTP instead
+        /// of TLS. With --to the flag does nothing: a stored entry, or a
+        /// discovery announcement, already decides the scheme. Plain mode
+        /// only changes the transport, never the target, and it sends the
+        /// PIN and the files in the clear, so only ever use it where the
+        /// link itself is already encrypted (Tailscale, WireGuard), never
+        /// on the open internet.
         #[arg(long)]
         plain: bool,
     },
@@ -297,9 +303,11 @@ pub enum Command {
         retries: u32,
 
         /// The peer serves plain HTTP (`receive --plain` on a private
-        /// network). Skips the TLS probe, so the connection never attempts a
-        /// handshake the peer cannot answer. Plain mode only changes the
-        /// transport, never the target — and it sends the PIN and the files
+        /// network). With --ip it skips the TLS probe, so the connection
+        /// never attempts a handshake the peer cannot answer. With --to the
+        /// flag is not needed: a stored entry, or a discovery announcement,
+        /// already carries the scheme. Plain mode only changes the
+        /// transport, never the target, and it sends the PIN and the files
         /// in the clear, so only ever use it where the link itself is already
         /// encrypted (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
@@ -357,9 +365,11 @@ pub enum Command {
         scan: u64,
 
         /// The peer serves plain HTTP (`receive --plain` on a private
-        /// network). Skips the TLS probe, so the connection never attempts a
-        /// handshake the peer cannot answer. Plain mode only changes the
-        /// transport, never the target — and it sends the PIN and the files
+        /// network). With --ip it skips the TLS probe, so the connection
+        /// never attempts a handshake the peer cannot answer. With --to the
+        /// flag is not needed: a stored entry, or a discovery announcement,
+        /// already carries the scheme. Plain mode only changes the
+        /// transport, never the target, and it sends the PIN and the files
         /// in the clear, so only ever use it where the link itself is already
         /// encrypted (Tailscale, WireGuard), never on the open internet.
         #[arg(long)]
