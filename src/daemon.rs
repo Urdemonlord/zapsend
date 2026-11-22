@@ -24,6 +24,8 @@ pub struct Options {
     pub settle: Option<u64>,
     pub keep: bool,
     pub scan: u64,
+    /// The peer serves plain HTTP (`receive --plain` on a private network).
+    pub plain: bool,
 }
 
 /// Names that are still being written by whatever produced them. Skipped for
@@ -150,6 +152,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 None,
                 false,
                 crate::ApiServer::Want,
+                false,
             )
             .await?
         }
@@ -381,7 +384,7 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
 
     let peer = match &opts.ip {
         Some(raw) => {
-            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "send files to")
+            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "send files to", opts.plain)
                 .await?
         }
         None => {

@@ -3,6 +3,12 @@
 //! TLS is pinned to the peer's certificate fingerprint. LocalSend hands the
 //! fingerprint out during discovery, so we never have to trust the network:
 //! the certificate the peer presents must hash to exactly that value.
+//!
+//! A peer that serves plain HTTP (`receive --plain`, private networks only)
+//! has no certificate: the client uses `http://` URLs and no pinning, and
+//! says so on stderr instead of pretending the connection is verified.
+//! Peer traffic honours `ZAPSEND_PROXY` (explicit proxy URL, loopback always
+//! direct), falling back to the environment's HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
 
 use crate::protocol::{
     DeviceInfo, FileMeta, Peer, PrepareDownloadResponse, PrepareUploadRequest, PrepareUploadResponse,
@@ -97,26 +103,66 @@ fn pinned_client(fingerprint_hex: &str) -> Result<reqwest::Client> {
         .with_custom_certificate_verifier(Arc::new(PinnedVerifier { expected }))
         .with_no_client_auth();
 
-    Ok(reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(config)
         .connect_timeout(std::time::Duration::from_secs(10))
         // ponytail: a total `.timeout()` bounds the whole request, so any
         // transfer longer than the bound dies mid-flight — a 300 MB file at
         // 5 MB/s over Tailscale is 60 s. `read_timeout` is per-read inactivity:
         // a peer that stops sending still fails, a slow one does not.
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()?)
+        .read_timeout(std::time::Duration::from_secs(60));
+    if let Some(proxy) = peer_proxy()? {
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder.build()?)
 }
 
 /// Only for peers whose fingerprint we do not know (plain `--ip` without
 /// `--fingerprint`). Everything discovered over multicast is pinned.
 fn unpinned_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .connect_timeout(std::time::Duration::from_secs(10))
         // Same reasoning as `pinned_client`: bound inactivity, not duration.
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()?)
+        .read_timeout(std::time::Duration::from_secs(60));
+    if let Some(proxy) = peer_proxy()? {
+        builder = builder.proxy(proxy);
+    }
+    Ok(builder.build()?)
+}
+
+/// Proxy for peer traffic, from the environment only — never hardcoded.
+///
+/// `ZAPSEND_PROXY` wins: a full proxy URL (`http://user:pass@host:3130`)
+/// used for every peer request. It exists for the sandbox case, where the
+/// tailnet is only reachable through the tunnel proxy (same host as the
+/// default `HTTPS_PROXY`, port 3130 instead of 3128). Without it, reqwest's
+/// built-in system proxy applies (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`
+/// from the environment), which is what makes the default sandbox setup work
+/// with no flag at all.
+///
+/// Loopback is always direct, and `NO_PROXY` is still honoured: a proxy in
+/// front of a loopback test would only add a failure that is not the peer's.
+fn peer_proxy() -> Result<Option<reqwest::Proxy>> {
+    let url = match std::env::var("ZAPSEND_PROXY") {
+        Ok(u) if !u.trim().is_empty() => u,
+        _ => return Ok(None),
+    };
+    let mut exclusions = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .unwrap_or_default();
+    for host in ["localhost", "127.0.0.1", "::1"] {
+        if !exclusions.split(',').any(|e| e.trim() == host) {
+            if !exclusions.is_empty() {
+                exclusions.push(',');
+            }
+            exclusions.push_str(host);
+        }
+    }
+    let proxy = reqwest::Proxy::all(url.as_str())
+        .context("ZAPSEND_PROXY is not a valid proxy URL")?
+        .no_proxy(reqwest::NoProxy::from_string(&exclusions));
+    Ok(Some(proxy))
 }
 
 #[derive(Clone)]

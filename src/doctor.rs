@@ -36,6 +36,8 @@ pub struct Options {
     pub scan: u64,
     /// Directory a receiver would write into.
     pub dir: PathBuf,
+    /// The peer serves plain HTTP (`receive --plain` on a private network).
+    pub plain: bool,
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
@@ -58,6 +60,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
         None,
         false,
         crate::ApiServer::Want,
+        false,
     )
     .await?;
 
@@ -188,7 +191,9 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                     "  ✓ peer      \"{}\" {}:{} over {} (LocalSend {})",
                     info.alias, peer.ip, info.port, info.protocol, info.version
                 );
-                if info.fingerprint.eq_ignore_ascii_case(&peer.info.fingerprint) {
+                if !info.fingerprint.is_empty()
+                    && info.fingerprint.eq_ignore_ascii_case(&peer.info.fingerprint)
+                {
                     say!("              fingerprint matches what discovery announced");
                 } else if !peer.info.fingerprint.is_empty() {
                     say!("              ! fingerprint differs from the announcement — pass --ip to skip discovery");
@@ -246,7 +251,10 @@ async fn resolve(stack: &Stack, opts: &Options, target: &str) -> Result<Peer> {
                 device_type: None,
                 fingerprint: String::new(),
                 port,
-                protocol: "https".to_string(),
+                // --plain starts the probe at plain HTTP; without it the
+                // probe starts at TLS and falls back. Either way `fetch_info`
+                // asks the machine what it actually serves.
+                protocol: if opts.plain { "http".to_string() } else { "https".to_string() },
                 download: false,
             },
             ip: addr,

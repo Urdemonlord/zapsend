@@ -72,6 +72,11 @@ pub(crate) enum ApiServer {
 }
 
 /// Full stack: HTTPS API server + multicast discovery.
+///
+/// `plain` serves plain HTTP with no TLS instead. Only `receive --plain`
+/// passes true: a receiver on a private network whose link is already
+/// encrypted (Tailscale, WireGuard). The sender side always keeps TLS for
+/// its own listener — plain only ever describes the peer.
 pub(crate) async fn start(
     alias: &str,
     port: u16,
@@ -81,16 +86,21 @@ pub(crate) async fn start(
     pin: Option<String>,
     ask: bool,
     api: ApiServer,
+    plain: bool,
 ) -> Result<Stack> {
-    let (identity, mut me) = identity::load_or_create(alias, port)?;
+    let (tls, mut me) = if plain {
+        (None, identity::plain_info(alias, port))
+    } else {
+        let (identity, info) = identity::load_or_create(alias, port)?;
+        let tls = RustlsConfig::from_pem(
+            identity.cert_pem.into_bytes(),
+            identity.key_pem.into_bytes(),
+        )
+        .await
+        .context("building TLS config")?;
+        (Some(tls), info)
+    };
     let registry = discovery::new_registry();
-
-    let tls = RustlsConfig::from_pem(
-        identity.cert_pem.into_bytes(),
-        identity.key_pem.into_bytes(),
-    )
-    .await
-    .context("building TLS config")?;
 
     // Bind before spawning so a taken port fails loudly here instead of
     // silently leaving a receiver that claims to listen but never does.
@@ -132,14 +142,29 @@ pub(crate) async fn start(
 
     if let Some(listener) = listener {
         listener.set_nonblocking(true)?;
-        tokio::spawn(async move {
-            if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-            {
-                eprintln!("! API server stopped: {e}");
-            }
-        });
+        if plain {
+            // No TLS at all: the same router, the same PIN checks, served
+            // over plain HTTP. Only reachable on a private network — the
+            // caller (`receive --plain`) is what opts into this.
+            tokio::spawn(async move {
+                if let Err(e) = axum_server::from_tcp(listener)
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                {
+                    eprintln!("! API server stopped: {e}");
+                }
+            });
+        } else {
+            let tls = tls.expect("TLS config is built whenever plain is false");
+            tokio::spawn(async move {
+                if let Err(e) = axum_server::from_tcp_rustls(listener, tls)
+                    .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                    .await
+                {
+                    eprintln!("! API server stopped: {e}");
+                }
+            });
+        }
     }
 
     let sock = Arc::new(discovery::bind_multicast()?);
@@ -199,7 +224,8 @@ async fn run() -> Result<()> {
             ip,
             fingerprint,
             pin,
-        } => trust(&name, &ip, fingerprint, pin).await,
+            plain,
+        } => trust(&name, &ip, fingerprint, pin, plain).await,
         Command::Hosts => print_hosts(),
         Command::Forget { name } => forget(&name),
         Command::Discover { wait } => discover(&alias, port, wait).await,
@@ -212,6 +238,7 @@ async fn run() -> Result<()> {
             pin,
             scan,
             retry,
+            plain,
         } => {
             send(
                 &alias,
@@ -224,6 +251,7 @@ async fn run() -> Result<()> {
                 pin,
                 scan,
                 retry,
+                plain,
             )
             .await
         }
@@ -232,7 +260,8 @@ async fn run() -> Result<()> {
             pin,
             ask,
             share,
-        } => receive(&alias, port, dir, share, pin, ask).await,
+            plain,
+        } => receive(&alias, port, dir, share, pin, ask, plain).await,
         Command::Pull {
             to,
             ip,
@@ -243,6 +272,7 @@ async fn run() -> Result<()> {
             file,
             scan,
             retry,
+            plain,
         } => {
             pull::run(
                 &alias,
@@ -257,6 +287,7 @@ async fn run() -> Result<()> {
                     file,
                     scan,
                     retry,
+                    plain,
                 },
             )
             .await
@@ -271,6 +302,7 @@ async fn run() -> Result<()> {
             dry_run,
             replace,
             retries,
+            plain,
         } => {
             sync::run(
                 &alias,
@@ -285,6 +317,7 @@ async fn run() -> Result<()> {
                     dry_run,
                     replace,
                     retries,
+                    plain,
                 },
             )
             .await
@@ -294,7 +327,8 @@ async fn run() -> Result<()> {
             ip,
             scan,
             dir,
-        } => doctor::run(&alias, port, doctor::Options { to, ip, scan, dir }).await,
+            plain,
+        } => doctor::run(&alias, port, doctor::Options { to, ip, scan, dir, plain }).await,
         Command::Daemon {
             dir,
             to,
@@ -306,6 +340,7 @@ async fn run() -> Result<()> {
             settle,
             keep,
             scan,
+            plain,
         } => {
             daemon::run(
                 &alias,
@@ -321,6 +356,7 @@ async fn run() -> Result<()> {
                     settle,
                     keep,
                     scan,
+                    plain,
                 },
             )
             .await
@@ -463,6 +499,7 @@ async fn discover(alias: &str, port: u16, wait: u64) -> Result<()> {
         None,
         false,
         ApiServer::Want,
+        false,
     )
     .await?;
     eprintln!("scanning for {wait}s…");
@@ -555,14 +592,40 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<client::Upload>) -> Result<(
 ///   over /info and save it under the address, so the next command verifies
 ///   against it. Only on a network you trust.
 /// A peer that serves plain HTTP has no certificate to pin; that is reported,
-/// not refused — the peer itself chose unencrypted traffic.
+/// not refused — the peer itself chose unencrypted traffic. `--plain` is the
+/// explicit form of that: the caller already knows the peer is plain (a
+/// `receive --plain` receiver on a private network), so no fingerprint is
+/// asked for, saved, or checked. It contradicts `--fingerprint`.
 pub(crate) async fn resolve_ip_peer(
     raw: &str,
     fingerprint: Option<&str>,
     tofu: bool,
     verb: &str,
+    plain: bool,
 ) -> Result<Peer> {
     let (addr, target_port) = parse_target(raw)?;
+    if plain && fingerprint.is_some() {
+        bail!("--plain and --fingerprint contradict each other: a plain-HTTP peer has no certificate to pin");
+    }
+    if plain {
+        // Nothing to verify and nothing to save: a plain peer announces no
+        // fingerprint, and the caller already decided this address is plain.
+        // The caller fetches /info next and learns resume/download from it.
+        return Ok(Peer {
+            info: DeviceInfo {
+                zapsend_resume: false,
+                alias: raw.to_string(),
+                version: PROTOCOL_VERSION.to_string(),
+                device_model: None,
+                device_type: None,
+                fingerprint: String::new(),
+                port: target_port,
+                protocol: "http".to_string(),
+                download: false,
+            },
+            ip: addr,
+        });
+    }
     let key = hosts::address_key(addr, target_port);
     let mut peer = Peer {
         info: DeviceInfo {
@@ -701,6 +764,7 @@ async fn send(
     pin: Option<String>,
     scan_secs: u64,
     retries: u32,
+    plain: bool,
 ) -> Result<()> {
     // `--to a,b,c` (or `--to all`, every trusted host) fans the same files out to
     // a list. Resolving each name from the hosts file is the fleet case; a scan
@@ -731,7 +795,7 @@ async fn send(
         Some(raw) => {
             let stack = local_only(alias, port)?;
             let mut peer =
-                resolve_ip_peer(&raw, fingerprint.as_deref(), tofu, "send files to").await?;
+                resolve_ip_peer(&raw, fingerprint.as_deref(), tofu, "send files to", plain).await?;
             // Ask who is actually there before sending: that is how we learn
             // whether it can resume a broken upload, and which scheme it serves.
             // A peer that does not answer /info is not a reason to give up.
@@ -761,6 +825,7 @@ async fn send(
                 None,
                 false,
                 ApiServer::Want,
+                false,
             )
             .await?;
             eprintln!("scanning for {scan_secs}s…");
@@ -1052,7 +1117,11 @@ async fn trust(
     raw_ip: &str,
     fingerprint: Option<String>,
     pin: Option<String>,
+    plain: bool,
 ) -> Result<()> {
+    if plain && fingerprint.is_some() {
+        bail!("--plain and --fingerprint contradict each other: a plain-HTTP peer has no certificate to pin");
+    }
     let (addr, port) = parse_target(raw_ip)?;
     let probe = Peer {
         info: DeviceInfo {
@@ -1071,8 +1140,14 @@ async fn trust(
         ip: addr,
     };
 
-    let stored = match (fingerprint, client::fetch_info(&probe).await) {
+    // A plain peer announces no fingerprint, so there is nothing to pin:
+    // `stored` is None for one, and the entry is usable because `peer_for`
+    // re-asks the machine for its scheme on every use.
+    let stored: Option<String> = match (fingerprint, client::fetch_info(&probe).await) {
         (Some(given), Ok(info)) => {
+            if info.protocol.eq_ignore_ascii_case("http") {
+                bail!("{raw_ip} serves plain HTTP — a --fingerprint is meaningless for it; drop the flag and pass --plain instead (private network only)");
+            }
             if !info.fingerprint.eq_ignore_ascii_case(&given) {
                 bail!(
                     "fingerprint mismatch — you gave {}, {} announced {}\n  nothing was saved",
@@ -1082,28 +1157,41 @@ async fn trust(
                 );
             }
             eprintln!("✓ fingerprint matches what {raw_ip} announced");
-            given
+            Some(given)
         }
         (Some(given), Err(e)) => {
             eprintln!("! {raw_ip} did not answer: {e:#}");
             eprintln!("  saving the fingerprint you gave, without checking it against the machine");
-            given
+            Some(given)
         }
         (None, Ok(info)) => {
-            if info.fingerprint.len() != 64 {
+            if info.protocol.eq_ignore_ascii_case("http") {
+                if !plain {
+                    bail!("{raw_ip} serves plain HTTP and announces no fingerprint — pass --plain to trust it anyway (private network only, never on the open internet)");
+                }
+                eprintln!("! {raw_ip} serves plain HTTP — there is no certificate to pin, traffic is unencrypted");
+                eprintln!("  stored without a fingerprint; only use this on a private network");
+                None
+            } else if plain {
+                // --plain asserts the peer is plain. A peer that answers over
+                // HTTPS is not, and trusting it as plain would silently
+                // downgrade every later send to unencrypted traffic.
+                bail!("{raw_ip} serves HTTPS — --plain would downgrade it; drop --plain and trust it normally");
+            } else if info.fingerprint.len() != 64 {
                 bail!("{raw_ip} did not announce a fingerprint, nothing to pin");
+            } else {
+                eprintln!("! trusting {raw_ip} on first sight — compare this with the fingerprint");
+                eprintln!("  that machine printed when it started:");
+                eprintln!("    {}", info.fingerprint);
+                Some(info.fingerprint)
             }
-            eprintln!("! trusting {raw_ip} on first sight — compare this with the fingerprint");
-            eprintln!("  that machine printed when it started:");
-            eprintln!("    {}", info.fingerprint);
-            info.fingerprint
         }
         (None, Err(e)) => {
             bail!("cannot reach {raw_ip}: {e:#}\n  pass --fingerprint to save it without a check")
         }
     };
 
-    let path = hosts::remember(name, &addr.to_string(), port, Some(stored.clone()), pin)?;
+    let path = hosts::remember(name, &addr.to_string(), port, stored.clone(), pin)?;
     if json_mode() {
         println!(
             "{}",
@@ -1113,14 +1201,20 @@ async fn trust(
                 "name": name,
                 "ip": addr.to_string(),
                 "port": port,
+                "plain": plain,
                 "fingerprint": stored,
                 "config": path.display().to_string(),
             })
         );
+    } else if stored.is_none() {
+        // Only a --plain trust stores without a fingerprint.
+        println!("✓ {name} → {addr}:{port}, plain HTTP (no certificate to pin)");
+        println!("  saved in {}", path.display());
+        println!("  now: zapsend send <file> --to {name} --plain");
     } else {
         println!(
             "✓ {name} → {addr}:{port}, pinned to {}",
-            identity::short_fingerprint(&stored)
+            identity::short_fingerprint(stored.as_deref().unwrap_or_default())
         );
         println!("  saved in {}", path.display());
         println!("  now: zapsend send <file> --to {name}");
@@ -1254,6 +1348,7 @@ async fn receive(
     share: Option<PathBuf>,
     pin: Option<String>,
     ask: bool,
+    plain: bool,
 ) -> Result<()> {
     let pin = match pin {
         None => None,
@@ -1289,6 +1384,7 @@ async fn receive(
         pin.clone(),
         ask,
         ApiServer::Required,
+        plain,
     )
     .await?;
 
@@ -1301,6 +1397,8 @@ async fn receive(
                 "command": "receive",
                 "alias": stack.me.alias,
                 "port": port,
+                "plain": plain,
+                "protocol": stack.me.protocol,
                 "fingerprint": stack.me.fingerprint,
                 "dir": dir.display().to_string(),
                 "share": share.as_ref().map(|s| s.display().to_string()),
@@ -1313,7 +1411,12 @@ async fn receive(
     banner();
     println!("  listening   :{port}");
     println!("  alias       {}", stack.me.alias);
-    println!("  fingerprint {}", stack.me.fingerprint);
+    if plain {
+        println!("  transport   plain HTTP — no TLS (private network only)");
+        println!("  fingerprint (none — plain HTTP, nothing to pin)");
+    } else {
+        println!("  fingerprint {}", stack.me.fingerprint);
+    }
     match pin {
         Some(p) => println!("  pin         {p}  (required for incoming transfers)"),
         None => println!("  pin         none — anyone on this network can send to you"),
