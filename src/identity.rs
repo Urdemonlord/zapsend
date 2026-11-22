@@ -77,6 +77,31 @@ pub fn load_or_create(alias: &str, port: u16) -> Result<(Identity, DeviceInfo)> 
     Ok((identity, info))
 }
 
+/// Identity for a plain-HTTP receiver: no certificate exists, so there is
+/// nothing to pin. The empty fingerprint is the marker the rest of the code
+/// already reads as "plain HTTP, no certificate to pin" (`require_verified`,
+/// `resolve_ip_peer`, `trust`); the `protocol` field is what makes peers
+/// build `http://` URLs instead of `https://`. Only ever served on a private
+/// network, where the link itself is already encrypted.
+pub fn plain_info(alias: &str, port: u16) -> DeviceInfo {
+    DeviceInfo {
+        zapsend_resume: false,
+        alias: alias.to_string(),
+        version: PROTOCOL_VERSION.to_string(),
+        device_model: Some(format!(
+            "{} {}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )),
+        // This is the whole point of the project: we tell peers we are headless.
+        device_type: Some("headless".to_string()),
+        fingerprint: String::new(),
+        port,
+        protocol: "http".to_string(),
+        download: false,
+    }
+}
+
 pub fn short_fingerprint(fp: &str) -> &str {
     if fp.len() >= 8 {
         &fp[..8]

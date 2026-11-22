@@ -1,5 +1,9 @@
 //! The receiving side: an HTTPS server that speaks the LocalSend upload API.
 //!
+//! `receive --plain` serves the same router over plain HTTP instead — same
+//! endpoints, same PIN checks, no TLS. Only for a private network, where the
+//! link itself is already encrypted (Tailscale, WireGuard).
+//!
 //! Endpoints (all under `/api/localsend/v2`):
 //!   POST /register        — peer announces itself to us
 //!   POST /prepare-upload  — peer offers file metadata, we hand back tokens

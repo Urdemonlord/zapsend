@@ -305,6 +305,7 @@ pub async fn run(
         pin.clone(),
         false,
         crate::ApiServer::Required,
+        false,
     )
         .await?;
 

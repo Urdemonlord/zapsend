@@ -38,6 +38,8 @@ pub struct Options {
     pub dry_run: bool,
     pub replace: bool,
     pub retries: u32,
+    /// The peer serves plain HTTP (`receive --plain` on a private network).
+    pub plain: bool,
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
@@ -241,7 +243,7 @@ async fn verify_replaced(
 /// devices that answered.
 async fn resolve(alias: &str, port: u16, opts: &Options) -> Result<Peer> {
     if let Some(raw) = opts.ip.as_deref() {
-        return crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "sync with")
+        return crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "sync with", opts.plain)
             .await;
     }
     match crate::peer_from_hosts(alias, port, &opts.to).await? {

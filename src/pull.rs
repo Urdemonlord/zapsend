@@ -27,6 +27,8 @@ pub struct Options {
     pub retry: u32,
     /// Discovery scan duration in seconds (ignored with --ip).
     pub scan: u64,
+    /// The peer serves plain HTTP (`receive --plain` on a private network).
+    pub plain: bool,
 }
 
 pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
@@ -58,7 +60,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
 
     let peer = match opts.ip.as_deref() {
         Some(raw) => {
-            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "pull files from")
+            crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "pull files from", opts.plain)
                 .await?
         }
         None => {
@@ -75,6 +77,7 @@ pub async fn run(alias: &str, port: u16, opts: Options) -> Result<()> {
                 None,
                 false,
                 ApiServer::Want,
+                false,
             )
             .await?;
             eprintln!("scanning for {}s…", opts.scan);

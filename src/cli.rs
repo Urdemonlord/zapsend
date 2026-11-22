@@ -56,6 +56,14 @@ pub enum Command {
         /// PIN to remember for this machine
         #[arg(long)]
         pin: Option<String>,
+
+        /// The peer serves plain HTTP (a `receive --plain` receiver on a
+        /// private network). Without it, trust refuses a peer that announces
+        /// no certificate fingerprint. Plain mode sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard) — never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// List remembered machines
@@ -120,6 +128,15 @@ pub enum Command {
         /// restart the file.
         #[arg(long, default_value_t = 3)]
         retry: u32,
+
+        /// The peer serves plain HTTP (`receive --plain` on a private
+        /// network). Skips the TLS probe, so the connection never attempts a
+        /// handshake the peer cannot answer. Plain mode only changes the
+        /// transport, never the target — and it sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Accept incoming files and keep running
@@ -142,6 +159,15 @@ pub enum Command {
         /// pull files from you (`zapsend pull`). Off by default.
         #[arg(long, value_name = "DIR")]
         share: Option<PathBuf>,
+
+        /// Serve plain HTTP with no TLS, for a private network only.
+        ///
+        /// The link to the other machine must already be encrypted
+        /// (Tailscale, WireGuard): plain mode sends the PIN and the files in
+        /// the clear, so it must never face the open internet. TLS stays the
+        /// default everywhere; this flag only opts this one receiver out.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Pull files from a device that shares a folder (Download API)
@@ -188,6 +214,15 @@ pub enum Command {
         /// Retry a broken download this many times, continuing where it stopped
         #[arg(long, default_value_t = 3)]
         retry: u32,
+
+        /// The peer serves plain HTTP (`receive --plain` on a private
+        /// network). Skips the TLS probe, so the connection never attempts a
+        /// handshake the peer cannot answer. Plain mode only changes the
+        /// transport, never the target — and it sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Check why discovery or sending is not working
@@ -207,6 +242,15 @@ pub enum Command {
         /// Directory a receiver would write into
         #[arg(long, default_value = "./zapsend-received")]
         dir: PathBuf,
+
+        /// The peer serves plain HTTP (`receive --plain` on a private
+        /// network). Skips the TLS probe, so the connection never attempts a
+        /// handshake the peer cannot answer. Plain mode only changes the
+        /// transport, never the target — and it sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Send only the files the other side does not already have
@@ -251,6 +295,15 @@ pub enum Command {
         /// Attempts per upload before giving up on it
         #[arg(long, default_value_t = 3)]
         retries: u32,
+
+        /// The peer serves plain HTTP (`receive --plain` on a private
+        /// network). Skips the TLS probe, so the connection never attempts a
+        /// handshake the peer cannot answer. Plain mode only changes the
+        /// transport, never the target — and it sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Watch a folder and send whatever appears in it
@@ -302,6 +355,15 @@ pub enum Command {
         /// Discovery scan duration in seconds (ignored with --ip)
         #[arg(long, default_value_t = 4)]
         scan: u64,
+
+        /// The peer serves plain HTTP (`receive --plain` on a private
+        /// network). Skips the TLS probe, so the connection never attempts a
+        /// handshake the peer cannot answer. Plain mode only changes the
+        /// transport, never the target — and it sends the PIN and the files
+        /// in the clear, so only ever use it where the link itself is already
+        /// encrypted (Tailscale, WireGuard), never on the open internet.
+        #[arg(long)]
+        plain: bool,
     },
 
     /// Browse devices and send from a local web page
