@@ -39,6 +39,8 @@ pub struct Options {
     pub replace: bool,
     pub retries: u32,
     /// The peer serves plain HTTP (`receive --plain` on a private network).
+    /// Only the --ip path reads it; with --to the stored entry already
+    /// carries the scheme, so the flag is not needed there.
     pub plain: bool,
 }
 

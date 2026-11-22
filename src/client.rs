@@ -141,8 +141,9 @@ fn unpinned_client() -> Result<reqwest::Client> {
 /// from the environment), which is what makes the default sandbox setup work
 /// with no flag at all.
 ///
-/// Loopback is always direct, and `NO_PROXY` is still honoured: a proxy in
-/// front of a loopback test would only add a failure that is not the peer's.
+/// Loopback is always direct (the whole 127/8, so 127.0.0.2 and friends
+/// count too), and `NO_PROXY` is still honoured: a proxy in front of a
+/// loopback test would only add a failure that is not the peer's.
 fn peer_proxy() -> Result<Option<reqwest::Proxy>> {
     let url = match std::env::var("ZAPSEND_PROXY") {
         Ok(u) if !u.trim().is_empty() => u,
@@ -151,7 +152,7 @@ fn peer_proxy() -> Result<Option<reqwest::Proxy>> {
     let mut exclusions = std::env::var("NO_PROXY")
         .or_else(|_| std::env::var("no_proxy"))
         .unwrap_or_default();
-    for host in ["localhost", "127.0.0.1", "::1"] {
+    for host in ["localhost", "127.0.0.0/8", "::1"] {
         if !exclusions.split(',').any(|e| e.trim() == host) {
             if !exclusions.is_empty() {
                 exclusions.push(',');

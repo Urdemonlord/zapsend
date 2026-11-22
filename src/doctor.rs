@@ -37,6 +37,9 @@ pub struct Options {
     /// Directory a receiver would write into.
     pub dir: PathBuf,
     /// The peer serves plain HTTP (`receive --plain` on a private network).
+    /// Only the --ip probe reads it: it starts over plain HTTP instead of
+    /// TLS. With --to the stored entry, or the discovery announcement,
+    /// already decides the scheme, so the flag does nothing there.
     pub plain: bool,
 }
 

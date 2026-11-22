@@ -591,11 +591,13 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<client::Upload>) -> Result<(
 /// * `--tofu` — trust on first sight: take the fingerprint the peer announces
 ///   over /info and save it under the address, so the next command verifies
 ///   against it. Only on a network you trust.
-/// A peer that serves plain HTTP has no certificate to pin; that is reported,
-/// not refused — the peer itself chose unencrypted traffic. `--plain` is the
-/// explicit form of that: the caller already knows the peer is plain (a
-/// `receive --plain` receiver on a private network), so no fingerprint is
-/// asked for, saved, or checked. It contradicts `--fingerprint`.
+/// A peer that serves plain HTTP has no certificate to pin. On the trust-on-
+/// first-sight path that is refused, not reported: `--tofu` is about the
+/// certificate, not the transport, and a cleartext answer must not carry the
+/// PIN and the files without the caller saying so. `--plain` is the explicit
+/// form of that: the caller already knows the peer is plain (a `receive
+/// --plain` receiver on a private network), so no fingerprint is asked for,
+/// saved, or checked. It contradicts `--fingerprint`.
 pub(crate) async fn resolve_ip_peer(
     raw: &str,
     fingerprint: Option<&str>,
@@ -660,16 +662,10 @@ pub(crate) async fn resolve_ip_peer(
         format!("cannot reach {raw}: pass --fingerprint to save it without a check")
     })?;
     if info.protocol.eq_ignore_ascii_case("http") {
-        peer.info.protocol = info.protocol.clone();
-        peer.info.zapsend_resume = info.zapsend_resume;
-        peer.info.download = info.download;
-        if !info.alias.is_empty() {
-            peer.info.alias = info.alias;
-        }
-        eprintln!(
-            "! {raw} serves plain HTTP — there is no certificate to pin, traffic is unencrypted"
-        );
-        return Ok(peer);
+        // Trust on first sight is about the certificate, not the transport:
+        // a cleartext answer must not carry the PIN and the files without
+        // the caller saying so with --plain.
+        bail!("{raw} serves plain HTTP. Pass --plain to send to it (private network only, never on the open internet)");
     }
     if info.fingerprint.len() != 64 {
         bail!("{raw} did not announce a fingerprint, nothing to pin — pass --fingerprint to save one without a check");
@@ -985,6 +981,14 @@ async fn send_to_peer(
                 "not in the hosts file — `zapsend trust {name} --ip <addr>` first"
             ));
         };
+        // A fingerprint-less entry that now answers over HTTPS is not the
+        // plain peer it was trusted as: refuse it the way the single-send
+        // path does, instead of letting the unpinned client talk to it.
+        require_verified(
+            &peer,
+            "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
+        )
+        .map_err(|e| format!("{e:#}"))?;
         eprintln!("→ {name} ({}:{})", peer.ip, peer.info.port);
         client::send_files(&peer, me, uploads, pin.as_deref(), retries)
             .await

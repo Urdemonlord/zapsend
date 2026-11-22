@@ -382,7 +382,7 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
         return Ok(peer.clone());
     }
 
-    let peer = match &opts.ip {
+    let mut peer = match &opts.ip {
         Some(raw) => {
             crate::resolve_ip_peer(raw, opts.fingerprint.as_deref(), opts.tofu, "send files to", opts.plain)
                 .await?
@@ -428,6 +428,17 @@ async fn ensure_peer(stack: &Stack, opts: &Options, cached: &mut Option<Peer>) -
         &peer,
         "re-trust it first: `zapsend trust NAME --ip ADDR`, or pass --fingerprint",
     )?;
+    // resolve_ip_peer with --plain returns before asking the machine, so
+    // resume support stays unknown; ask now, the way send() does. A peer
+    // that does not answer is not a reason to refuse the run.
+    if let Ok(info) = client::fetch_info(&peer).await {
+        peer.info.zapsend_resume = info.zapsend_resume;
+        peer.info.download = info.download;
+        peer.info.protocol = info.protocol;
+        if !info.alias.is_empty() {
+            peer.info.alias = info.alias;
+        }
+    }
     println!(
         "  target      \"{}\" {}:{}",
         peer.info.alias, peer.ip, peer.info.port

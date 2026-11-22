@@ -162,6 +162,14 @@ pub async fn sweep(registry: &Registry, me: &DeviceInfo, quiet: bool) -> Result<
             if info.fingerprint == me.fingerprint {
                 continue;
             }
+            // A plain receiver announces no fingerprint, and the registry is
+            // keyed by fingerprint: two of them would share the "" key and
+            // overwrite each other. Multicast already drops these, so the
+            // sweep does too; plain receivers are reachable only via --ip
+            // or a trusted hosts entry.
+            if info.fingerprint.is_empty() {
+                continue;
+            }
             registry
                 .lock()
                 .unwrap()

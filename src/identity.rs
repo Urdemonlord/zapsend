@@ -81,8 +81,12 @@ pub fn load_or_create(alias: &str, port: u16) -> Result<(Identity, DeviceInfo)> 
 /// nothing to pin. The empty fingerprint is the marker the rest of the code
 /// already reads as "plain HTTP, no certificate to pin" (`require_verified`,
 /// `resolve_ip_peer`, `trust`); the `protocol` field is what makes peers
-/// build `http://` URLs instead of `https://`. Only ever served on a private
-/// network, where the link itself is already encrypted.
+/// build `http://` URLs instead of `https://`. But an empty fingerprint is
+/// also what discovery reads as "not a real peer": multicast announcements
+/// and sweep answers without one are dropped, so a plain receiver is
+/// reachable only through `--ip` or a trusted hosts entry, never through
+/// discovery. Only ever served on a private network, where the link itself
+/// is already encrypted.
 pub fn plain_info(alias: &str, port: u16) -> DeviceInfo {
     DeviceInfo {
         zapsend_resume: false,
