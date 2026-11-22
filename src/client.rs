@@ -1097,9 +1097,10 @@ mod tests {
     /// so it is answered the same way but never recorded as a request: that
     /// is what makes the dummy useful, a peer that speaks HTTP where TLS was
     /// expected.
-    fn start_dummy() -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
+    /// The port is fixed, never 0: an ephemeral port is a new destination on
+    /// every run, and each new destination asks for its own approval.
+    fn start_dummy(port: u16) -> (u16, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -1191,7 +1192,7 @@ mod tests {
     #[tokio::test]
     async fn send_files_refuses_a_cleartext_retry_for_a_fingerprinted_peer() {
         install_crypto_provider();
-        let (port, seen, stop) = start_dummy();
+        let (port, seen, stop) = start_dummy(53524);
         let (path, upload) = payload("refuse");
         let err = send_files(&peer(port), &me(), &[upload], Some("123456"), 1, false)
             .await
@@ -1213,7 +1214,7 @@ mod tests {
     #[tokio::test]
     async fn send_files_retries_over_http_when_plain_is_given() {
         install_crypto_provider();
-        let (port, seen, stop) = start_dummy();
+        let (port, seen, stop) = start_dummy(53525);
         let (path, upload) = payload("plain");
         let err = send_files(&peer(port), &me(), &[upload], Some("123456"), 1, true)
             .await
